@@ -216,31 +216,49 @@ functions during review.
 
 ## Verify algorithm
 
+One predicate, two callers. `verifyWeeklyLayout` decides; `reformatWeeklySheet` acts on
+the decision; the panel renders it.
+
 ```
-reformatWeeklySheet(week):
-  sheet    = ss.getSheetByName(`WK${week}`)              → abort if missing
-  names    = ss.getRangeByName(`NAMES_${week}`)          → abort if missing
-  observed = names.getValues().flat().filter(nonEmpty)
+verifyWeeklyLayout(week, config, forms, memberData) → { ok, reason, detail, sheet, layout }
+
+  sheet    = ss.getSheetByName(`WK${week}`)
+             → { ok:false, reason:'no-sheet' } if missing
+  names    = ss.getRangeByName(`NAMES_${week}`)
+             → { ok:false, reason:'names-mismatch' } if missing
+  observed = names.getValues().flat()
+             → { ok:false, reason:'names-mismatch' } if any row is blank
   layout   = computeWeeklyLayout(week, config, forms, memberData,
                                  { displayEmpty, memberNames: observed })
-             → abort if null (no gamePlan for this week)
+             → { ok:false, reason:'no-form-data' } if null
 
-  assert sheet.getMaxRows()    === layout.rows
-  assert sheet.getMaxColumns() === layout.finalCol
-  assert normalize(row 1)      === normalize(layout.headers)     // strict, all-or-nothing
-  assert names.getRow()        === layout.entryRowStart
-  assert names.getNumRows()    === observed.length
-  assert paid column carries checkbox validation (if config.paidCheckboxes)
+  getMaxRows()      === layout.rows            else reason:'row-mismatch'
+  getMaxColumns()   === layout.finalCol        else reason:'col-mismatch'
+  normalize(row 1)  === normalize(layout.headers)
+                                               else reason:'drift'    // strict,
+                                                                      // all-or-nothing
+  names.getRow()    === layout.entryRowStart   else reason:'names-mismatch'
+  names.getNumRows()=== layout.totalMembers    else reason:'names-mismatch'
+  paid column carries checkbox validation      else reason:'checkbox-missing'
+    (only when config.paidCheckboxes)
 
-  on any failure → abort with the specific mismatch and the remedy
-                   ("Week N's matchups no longer match the schedule —
-                     use Deploy / Refresh to rebuild instead")
+  → { ok:true, reason:'ready', sheet, layout }
+```
 
-  applyWeeklyFormatting(sheet, layout)
+`detail` carries the specific mismatch and its remedy — for `drift`, "Week N's matchups
+no longer match the schedule — use Deploy / Refresh to rebuild instead."
+
+```
+reformatWeeklySheet(week):
+  v = verifyWeeklyLayout(week, ...)
+  if (!v.ok) → report v.detail, change nothing
+  applyWeeklyFormatting(v.sheet, v.layout)
 ```
 
 Abort means abort. The tool does not guess, does not partially apply, and does not
-repair structure.
+repair structure. Note that `observed` rejects blank rows outright rather than filtering
+them: a gap inside `NAMES_{week}` means the grid disagrees with the member list, which is
+a rebuild's job, not a reformat's.
 
 ## Pre-existing defects fixed as part of the move
 
@@ -297,15 +315,83 @@ in a new home.
 2. The same split for `totSheet` / `rnkSheet` / `pctSheet` — near-identical twins, ~9
    formatting calls each. Cheap proof the contract generalizes.
 3. `reformatWeeklySheet(week)` plus the verify step.
-4. A "🎨 Reapply Formatting" item in the Utilities submenu (`picks.gs:140-160`),
-   following the `deploy*` wrapper pattern at `picks.gs:7128-7237` and gated on
-   `config.pickemsInclude` like its neighbours. Prompts for a week or all weeks; builds
-   its candidate list as the intersection of `Object.keys(formsData)` (the idiom already
-   used at `picks.gs:7826`) and the WK sheets that exist; reports skipped weeks in the
-   closing toast.
+4. A "🎨 Reapply Formatting" item in the Utilities submenu (`picks.gs:140-160`), gated
+   on `config.pickemsInclude` like its neighbours, opening the selection panel below.
 
 Deferred to later specs: leaderboard/season/summary (phase 3) and the mid-tier
 mnf/outcomes/contrarian/counts/winners/survElim (phase 2).
+
+## Selection panel
+
+The tool refuses per week, for different reasons, so the selection UI shows why *before*
+you commit rather than reporting it in a toast afterward.
+
+```
+┌─ 🎨 Reapply Formatting ──────────────┐
+│  [ Select all ]  [ Clear ]           │
+│                                      │
+│  ☑ WK 1    ✅ ready                  │
+│  ☑ WK 2    ✅ ready                  │
+│  ☐ WK 4    ⚠️ schedule drift          │
+│            → use Deploy / Refresh    │
+│  ☐ WK 6    🚫 no form data           │
+│                                      │
+│  4 of 6 weeks selected               │
+│        [ Reapply Formatting ]        │
+└──────────────────────────────────────┘
+```
+
+Weeks that cannot be reformatted render disabled and unchecked, with the reason and the
+remedy inline. "Select all" selects only the ready ones.
+
+### This forces verify to return a status, not throw
+
+To populate that list the panel runs verify as a **dry run** across every candidate week.
+So verify is factored as a pure predicate and the abort is layered on top:
+
+```js
+verifyWeeklyLayout(sheet, layout) → { ok, reason, detail }
+    reason ∈ 'ready' | 'drift' | 'no-form-data' | 'no-sheet' | 'row-mismatch'
+           | 'col-mismatch' | 'names-mismatch' | 'checkbox-missing'
+```
+
+- `getReformatPanelData()` maps the result over every candidate week to render the list.
+- `reformatWeeklySheet(week)` calls it and aborts on `!ok`, using `detail` as the message.
+
+The two paths share one implementation, so the panel can never promise a week that the
+reformat then refuses.
+
+### Components
+
+Follows the established panel idiom (`launchSurvElimPanel` `picks.gs:1672`,
+`showRenamePanel` `picks.gs:1445`, `renamePanel.html`): Montserrat, `#013369` primary,
+`.btn-primary`/`.btn-secondary`, a hidden processing state, `google.script.host.close()`
+on success.
+
+| Component | Kind | Role |
+|---|---|---|
+| `launchReformatPanel()` | `picks.gs` | `createHtmlOutputFromFile` → `showModalDialog` |
+| `getReformatPanelData()` | `picks.gs` | candidate weeks + dry-run status per week |
+| `processReformatSubmission(weeks)` | `picks.gs` | loops selected weeks, returns a per-week report |
+| `reformatPanel.html` | new file | checkbox list, select-all, submit, result summary |
+
+Candidate weeks are the intersection of `Object.keys(formsData)` (the idiom already used
+at `picks.gs:7826`) and the WK sheets that actually exist. `processReformatSubmission`
+calls `weeklySheetTabColors(ss, maxWeek, true)` once after the loop — tab colour is
+spreadsheet-scoped, per finding 6.
+
+## Future extensions
+
+Deliberately out of scope for phase 1, recorded so the design leaves room:
+
+- **Additive mode.** `applyFormatting` currently opens with `clearFormat()`, so a reformat
+  discards manual formatting applied by hand to a weekly sheet. An additive variant would
+  skip the `clearFormat()` and layer generated formatting over what is there. Correct
+  default is the destructive one — the tool's job is "make this match the generated
+  output" — but the `clearFormat()` call is a single line, so a per-run toggle stays cheap
+  to add later.
+- **Phase 2/3 sheets** in the panel. Once the other builders are split, the same panel can
+  list non-weekly sheets alongside the weeks.
 
 ## Testing
 
@@ -320,6 +406,8 @@ against a copy of the spreadsheet. Before/after checks per sheet:
 - Reformat a week with no forms entry → skipped and reported, no throw.
 - Confirm `TOT_OVERALL`, `NAMES_n`, `NFL_PICKS_n` still resolve after a reformat, and
   that TOTAL/RNK/PCT/MNF/WINNERS show unchanged values.
+- Panel: a drifted week renders disabled with its reason, "Select all" skips it, and the
+  status it shows matches what `reformatWeeklySheet` actually does for that week.
 
 Record the before/after of a populated week explicitly — the paid column is the canary
 for a leaked value write, and the spread row is the canary for a leaked content write.
