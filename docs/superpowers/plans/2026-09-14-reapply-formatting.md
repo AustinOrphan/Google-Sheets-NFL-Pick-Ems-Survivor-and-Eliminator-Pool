@@ -659,84 +659,16 @@ Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
 
 ---
 
-### Task 3: Fix the day-coloration defects
+### Task 3 — folded into Task 5
 
-Two real bugs that Task 2's tests already cover. Spec defects 1 and 2.
+Originally a standalone fix for the two day-coloration defects (picks.gs:9951 targeting a
+loop-invariant column, picks.gs:9957 pushing a builder instead of a built rule). It could not
+stand alone: the fix belongs in `applyWeeklyFormatting`, which Task 5 creates, and no
+automated test can observe it before then. Both defects are now fixed by Task 5's Delta 4,
+which touches the same lines once instead of twice.
 
-**Files:**
-- Modify: `picks.gs` — the contests loop, picks.gs:9951-9958
-
-**Interfaces:**
-- Consumes: `layout.matchupDescriptors` from Task 2.
-- Produces: nothing new.
-
-- [ ] **Step 1: Confirm the bug is real before fixing it**
-
-Run: `sed -n '9951p' picks.gs`
-Expected: `let writeCell = sheet.getRange(subHeaderRow,firstMatchupCol+(matchups-1));`
-
-`matchups` is `contests.length` — loop-invariant. So all N rules target the last matchup
-column. The Task 2 test `every matchup descriptor has a distinct, ascending column` is the
-regression guard.
-
-- [ ] **Step 2: Record the current rule count in the spreadsheet (before state)**
-
-Spec defect 2 requires confirming the pushed-builder behaviour rather than assuming it.
-
-1. Open a **copy** of the pool spreadsheet.
-2. Select a populated `WK` sheet → Format → Conditional formatting.
-3. Count the rules in the sidebar and screenshot the list.
-4. Note specifically whether any rule targets the sub-header row of a *non-final* matchup column.
-
-Record the number here before proceeding: `________`
-
-- [ ] **Step 3: Replace the loop's rule construction**
-
-Before (picks.gs:9951-9958):
-```js
-    let writeCell = sheet.getRange(subHeaderRow,firstMatchupCol+(matchups-1));
-    let rule = SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(`=not(isblank(indirect("R${outcomeRow}C[0]",false)))`)
-      .setBackground(dayColorsFilledObj[day] || '#b0b0b0')
-      .setBold(true)
-      .setRanges([writeCell]);
-    rule.build();
-    formatRules.push(rule);
-```
-
-After — this moves to `applyWeeklyFormatting` in Task 5, driven by descriptors:
-```js
-  layout.matchupDescriptors.forEach(d => {
-    formatRules.push(SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(`=not(isblank(indirect("R${layout.outcomeRow}C[0]",false)))`)
-      .setBackground(d.dayFill)
-      .setBold(true)
-      .setRanges([sheet.getRange(layout.subHeaderRow, d.col)])
-      .build());                                  // build() result is now USED
-  });
-```
-
-Two fixes in one: `d.col` is distinct per matchup, and the built rule is pushed instead of the
-builder.
-
-- [ ] **Step 4: Run the tests**
-
-Run: `npm test`
-Expected: `0 failed`.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add picks.gs
-git commit -m "fix: day-coloration rules targeted one column and pushed a builder
-
-picks.gs:9951 used firstMatchupCol+(matchups-1), a loop invariant, so every
-per-day rule targeted the final matchup column instead of its own. picks.gs:9957
-called rule.build() and discarded the result, pushing the builder to
-setConditionalFormatRules. Both are now driven from layout.matchupDescriptors.
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
-```
+Task numbering is unchanged so that every cross-reference in this document stays valid.
+Twelve tasks execute: 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13.
 
 ---
 
@@ -894,8 +826,39 @@ For each of the three, the pattern is:
 
 - [ ] **Step 4: Delta 4 — drive day colours from descriptors**
 
-The sub-header day colours at picks.gs:10710 currently come from a positional array. Drive them from the descriptors instead, so header colours and fill rules share one identity-keyed source:
+This delta also fixes the two day-coloration defects (spec defects 1 and 2, folded in from
+the former Task 3).
 
+**Before** — the day-fill rules, built inside the contests loop at picks.gs:9951-9958:
+```js
+    let writeCell = sheet.getRange(subHeaderRow,firstMatchupCol+(matchups-1));
+    let rule = SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=not(isblank(indirect("R${outcomeRow}C[0]",false)))`)
+      .setBackground(dayColorsFilledObj[day] || '#b0b0b0')
+      .setBold(true)
+      .setRanges([writeCell]);
+    rule.build();
+    formatRules.push(rule);
+```
+
+`matchups` is `contests.length`, a loop invariant, so every one of the N rules targets the
+*last* matchup column. And `rule.build()`'s return value is discarded while the *builder* is
+pushed onto `formatRules`, which `setConditionalFormatRules` does not accept.
+
+**After** — in `applyWeeklyFormatting`, driven by descriptors:
+```js
+  layout.matchupDescriptors.forEach(d => {
+    formatRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=not(isblank(indirect("R${layout.outcomeRow}C[0]",false)))`)
+      .setBackground(d.dayFill)
+      .setBold(true)
+      .setRanges([sheet.getRange(layout.subHeaderRow, d.col)])
+      .build());                                  // build() result is now USED
+  });
+```
+
+The sub-header background colours at picks.gs:10710 come from the same source rather than a
+parallel positional array:
 ```js
   sheet.getRange(layout.subHeaderRow, layout.firstMatchupCol, 1, layout.matchupDescriptors.length)
     .setBackgrounds([layout.matchupDescriptors.map(d => d.dayHeader)]);
@@ -932,6 +895,20 @@ Expected: no output.
 
 The pattern is deliberately narrow — a conditional-format *formula string* at picks.gs:10540 contains `columns(indirect(...))`, which a looser grep would match.
 
+- [ ] **Step 8b: MANUAL — confirm the day-coloration fix**
+
+The two defects folded in from Task 3 cannot be seen by any local test — they only manifest as
+conditional-format rules in the spreadsheet.
+
+1. In a **copy**, open a populated `WK` sheet → Format → Conditional formatting.
+2. Record the rule count and whether any rule targets the sub-header of a *non-final* matchup
+   column. Before the fix, none do — every day rule points at the last matchup column.
+3. Paste the updated `picks.gs`, run `weeklySheet(null, 5)`.
+4. Reopen the conditional-formatting sidebar. Confirm there is now one sub-header rule **per
+   matchup column**, not N rules stacked on the final one.
+5. Enter a winner in the outcome row for an early-week game and confirm *that* game's
+   sub-header cell fills with its day colour — previously only the last column responded.
+
 - [ ] **Step 9: Run the tests and syntax check**
 
 Run: `npm test && cp picks.gs /tmp/p.js && node --check /tmp/p.js && echo SYNTAX_OK`
@@ -947,7 +924,9 @@ Owns conditional rules, static formats, validation, notes, widths and merges.
 Opens with clearFormat since clear() now belongs to the write path, breaks
 merges before re-merging, and re-asserts checkbox validation rather than calling
 insertCheckboxes, which would reset paid status. Day colours are driven from
-matchupDescriptors instead of a positional array.
+matchupDescriptors instead of a positional array, which fixes two defects: the
+per-day rules all targeted the final matchup column because picks.gs:9951 used a
+loop invariant, and picks.gs:9957 pushed a builder instead of the built rule.
 
 Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
 ```
