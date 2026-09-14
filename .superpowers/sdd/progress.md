@@ -23,3 +23,13 @@ Minor findings deferred to final whole-branch review triage:
   - M6 unescaped identifier interpolation into new RegExp in bodyOf and callee detection.
   - M7 topLevelNames misses destructuring and comma-chained declarations; a miss is
     silent (name absent from shim) rather than an error.
+  - Re-review found 2 NEW Critical silent bypasses (reproduced independently):
+      A. concise-body arrow helper: bodyOf walks past it to an unrelated brace, never
+         scans the body. Gate said "clean" exit 0 with a live setValue.
+      B. bare-reference callee (.forEach(fn)): never enqueued, body never scanned.
+    Fix pass 2 in flight. picks.gs has 0 top-level concise arrows, so failing loudly
+    on them costs nothing today.
+  - Plan now states the gate is a heuristic backstop, not a proof; Task 8 manual
+    canaries (paid checkbox + hand-entered spread) are the authoritative check.
+  - SCOPE CAP: if a 3rd round of Criticals lands on this gate, accept it as heuristic
+    and move on rather than pursuing exhaustive static analysis.

@@ -16,6 +16,7 @@
 
 - **`applyWeeklyFormatting` and everything it calls must never invoke:** `setValue` · `setValues` · `setFormula` · `setFormulaR1C1` · `setFormulas` · `setFormulasR1C1` · `clear(...)` (any arguments) · `clearContent` (Range) · `clearContents` (Sheet) · `insertCheckboxes` · `adjustRows` · `adjustColumns` · `ss.setNamedRange`. Enforced by `npm run gate`.
 - **The gate must fail loudly, never silently.** If it cannot parse a function body it must exit non-zero, not skip the function.
+- **The gate is a heuristic backstop, not a proof.** Regex-based static analysis of JavaScript cannot be exhaustive — dynamic dispatch, `eval`, and callbacks through variables can evade it. The authoritative verification is the manual canary checks in Task 8: a ticked paid checkbox and a hand-entered spread value must both survive a reformat. Do not let a green gate substitute for running those.
 - **`clearFormat` is required**, not optional: every `apply*Formatting` opens with it. It is the only thing that removes stale formatting once `clear()` is gone.
 - **Formulas are out of scope for the reformat path.** They belong to `writeContent` and `allFormulasUpdate`.
 - **Preserve every existing signature.** `weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild)` has one caller (picks.gs:5435). `totSheet`/`rnkSheet`/`pctSheet` take `(ss, memberData)` and have three callers each — `setupSheets` (picks.gs:1150/1154/1158), their own `deploy*` wrapper (picks.gs:7131/7138/7145), and the dependency guard in `deployLeaderboardSheet` (picks.gs:7202-7204).
