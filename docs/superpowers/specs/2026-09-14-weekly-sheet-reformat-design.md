@@ -93,14 +93,19 @@ formatting rules to indicate paid status", so a naive extraction sweeps it into
 `applyFormatting` and every reformat silently un-pays the whole pool.
 
 **Resolution.** `writeContent` owns `insertCheckboxes` (creation only). `applyFormatting`
-keeps `.setFontSize(11).setHorizontalAlignment('center')` and, where it needs to assert
-checkbox presence, uses:
+keeps `.setFontSize(11).setHorizontalAlignment('center')` and unconditionally re-asserts
+the validation with:
 
 ```js
 range.setDataValidation(SpreadsheetApp.newDataValidation().requireCheckbox().build())
 ```
 
-which installs the same validation without touching values.
+which installs the same validation without touching values. Because that call is
+value-safe, a paid column that has lost its checkbox validation is **repaired in place
+and the reformat proceeds** — it is not a verify failure. This is the one structural
+defect reformat fixes rather than refuses, and it is safe precisely because
+`setDataValidation` cannot alter a cell's contents. An empty cell under checkbox
+validation renders unchecked, which is the correct representation of "not paid".
 
 > **This is already a live bug, independent of the refactor.**
 > `getExistingWeeklySheetData` and `remapAndRepopulateData` (`picks.gs:10925-11091`)
@@ -239,8 +244,6 @@ verifyWeeklyLayout(week, config, forms, memberData) → { ok, reason, detail, sh
                                                                       // all-or-nothing
   names.getRow()    === layout.entryRowStart   else reason:'names-mismatch'
   names.getNumRows()=== layout.totalMembers    else reason:'names-mismatch'
-  paid column carries checkbox validation      else reason:'checkbox-missing'
-    (only when config.paidCheckboxes)
 
   → { ok:true, reason:'ready', sheet, layout }
 ```
@@ -352,7 +355,7 @@ So verify is factored as a pure predicate and the abort is layered on top:
 ```js
 verifyWeeklyLayout(sheet, layout) → { ok, reason, detail }
     reason ∈ 'ready' | 'drift' | 'no-form-data' | 'no-sheet' | 'row-mismatch'
-           | 'col-mismatch' | 'names-mismatch' | 'checkbox-missing'
+           | 'col-mismatch' | 'names-mismatch'
 ```
 
 - `getReformatPanelData()` maps the result over every candidate week to render the list.
