@@ -33,3 +33,13 @@ Minor findings deferred to final whole-branch review triage:
     canaries (paid checkbox + hand-entered spread) are the authoritative check.
   - SCOPE CAP: if a 3rd round of Criticals lands on this gate, accept it as heuristic
     and move on rather than pursuing exhaustive static analysis.
+
+Task 1: COMPLETE (commits 28513dd..e1e0a85, 2 fix passes)
+  Verified by controller directly against the fixed gate (md5-matched copy), 5 cases:
+    concise-arrow -> fails loudly | bare-ref callee -> BANNED caught
+    direct write -> caught | clean code -> passes | missing clearFormat -> caught
+  Third review round deliberately skipped (scope cap). FINAL REVIEW MUST RE-EXAMINE
+  tests/banned-apis.js - two rounds found 2 Criticals each; also check whether Fix B's
+  bare-word traversal causes noise once applyWeeklyFormatting actually exists (Task 5).
+  Note: .superpowers/sdd/.gitignore is `*`, so only progress.md is force-tracked;
+  task-N-report.md files are local scratch and will not survive a clean checkout.
