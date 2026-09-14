@@ -1,5 +1,30 @@
 'use strict';
 
+// ---------------------------------------------------------------------------
+// LIMITATIONS - READ BEFORE TRUSTING A CLEAN RESULT
+//
+// This gate is a heuristic backstop, not a proof. It is regex-based static
+// analysis of JavaScript/Apps Script source text, not a parser - and
+// regex-based static analysis of JavaScript cannot be exhaustive. It can
+// always be defeated by code shaped specifically to defeat it. In
+// particular this gate CANNOT see:
+//   - dynamic dispatch, e.g. obj[name]() or obj['set' + 'Value']()
+//   - eval()/Function() construction of code at runtime
+//   - a banned call reached only through a callback stored in a variable,
+//     array, or object property rather than referenced by its own bare
+//     name (e.g. `const fns = [smuggler]; fns[0](range);`)
+//   - anything hidden behind a class of unparseable code this scanner does
+//     not yet know to fail loudly on (see bodyOf()/ConciseArrowBodyError
+//     below for the two classes it does know about)
+//
+// A clean run of this gate ("banned-api gate: clean") is evidence, not
+// certainty. The authoritative check that applyWeeklyFormatting - and
+// everything it transitively calls - never mutates sheet data is the
+// manual canary checks in the plan's Task 8: a ticked paid checkbox and a
+// hand-entered spread value must both survive a reformat. Do not treat a
+// clean gate result alone as sufficient signoff.
+// ---------------------------------------------------------------------------
+
 const { load } = require('./harness.js');
 
 const ENTRIES = ['applyWeeklyFormatting'];   // Task 11 appends applySimpleFormatting
@@ -163,11 +188,88 @@ function findMatchingBrace(src, start) {
   return -1;
 }
 
+// Thrown by bodyOf() when a declaration is a concise-body arrow function
+// (`=> expr`, no `{`) - see the comment on isConciseArrowBody() for why this
+// must be a loud failure rather than an attempted parse or a silent skip.
+class ConciseArrowBodyError extends Error {
+  constructor(name) {
+    super(
+      `${name}: declared as a concise-body arrow ("=> expr" with no "{") - ` +
+      `this gate's regex-based scanner cannot safely locate the end of an ` +
+      `expression body (there is no brace to balance), so it cannot be ` +
+      `scanned for banned calls. Rewrite it with a block body ` +
+      `("=> { ... }") so the gate can read it.`
+    );
+    this.fnName = name;
+  }
+}
+
+// True iff, starting at `pos` (the position immediately after the '=' of a
+// top-level `const/let/var NAME = ...` declaration matched by bodyOf()'s own
+// regex), the right-hand side is an arrow function whose body is a bare
+// expression rather than a block. False for everything else - a function
+// expression (`= function(...) {...}`), a non-function value, a reference to
+// another name, or a block-bodied arrow (`= (...) => {...}`) - all of which
+// the existing '{'-to-matching-'}' walk in bodyOf() already handles
+// correctly and must keep handling unchanged.
+//
+// Why this needs its own tiny scan instead of reusing findMatchingBrace():
+// a concise arrow's body has no '{' at all, so "find the first '{' after the
+// declaration" (bodyOf()'s normal strategy) walks straight past the
+// declaration into whatever unrelated '{' appears later in the file and
+// returns that as the "body" - silently scanning the wrong code. This
+// function only has to answer "is there a '{' immediately after this
+// specific '=>'?", which needs nothing more than matching the arrow's own
+// parameter list.
+function isConciseArrowBody(src, pos) {
+  let i = pos;
+  const skipWs = () => { while (i < src.length && /\s/.test(src[i])) i++; };
+
+  skipWs();
+  if (/^function(?![\w$])/.test(src.slice(i))) return false; // function expr, not an arrow
+  if (/^async(?![\w$])/.test(src.slice(i))) {
+    i += 'async'.length;
+    skipWs();
+    if (/^function(?![\w$])/.test(src.slice(i))) return false; // async function expr
+  }
+
+  if (src[i] === '(') {
+    // Parenthesized parameter list - track paren depth only (default-value
+    // braces, if any, don't affect where this list ends).
+    let depth = 0;
+    for (; i < src.length; i++) {
+      if (src[i] === '(') depth++;
+      else if (src[i] === ')') { depth--; if (depth === 0) { i++; break; } }
+    }
+  } else if (/[A-Za-z_$]/.test(src[i] || '')) {
+    // Bare single-identifier parameter, e.g. `x => x + 1`.
+    while (i < src.length && /[\w$]/.test(src[i])) i++;
+  } else {
+    return false; // RHS doesn't start like an arrow's parameter list at all
+  }
+
+  skipWs();
+  if (src[i] !== '=' || src[i + 1] !== '>') return false; // not an arrow
+  i += 2;
+  skipWs();
+  return src[i] !== '{'; // concise (expression) body iff no block follows
+}
+
 function bodyOf(src, name) {
   const re = new RegExp(
     `^(?:function\\s+${name}\\s*\\(|(?:const|let|var)\\s+${name}\\s*=)`, 'm');
   const m = re.exec(src);
   if (!m) return null;
+
+  // Only the `(const|let|var) NAME =` alternative can be an arrow - the
+  // `function NAME(` alternative always has a real block body. Check for a
+  // concise arrow *before* doing the normal brace walk, so Gap A (a concise
+  // arrow's body being silently mis-scanned as unrelated later code) fails
+  // loudly instead.
+  if (/=\s*$/.test(m[0]) && isConciseArrowBody(src, m.index + m[0].length)) {
+    throw new ConciseArrowBodyError(name);
+  }
+
   const start = src.indexOf('{', m.index);
   if (start === -1) return null;
   const end = findMatchingBrace(src, start);
@@ -180,7 +282,14 @@ const declared = declaredFunctionNames(src);
 const problems = [];
 
 for (const entry of ENTRIES) {
-  const own = bodyOf(src, entry);
+  let own;
+  try {
+    own = bodyOf(src, entry);
+  } catch (e) {
+    if (!(e instanceof ConciseArrowBodyError)) throw e;
+    problems.push(e.message);
+    continue;
+  }
   if (own === null) { problems.push(`${entry}: not found in picks.gs`); continue; }
 
   for (const [label, re] of REQUIRED) {
@@ -191,7 +300,16 @@ for (const entry of ENTRIES) {
   const queue = [entry];
   while (queue.length) {
     const fname = queue.shift();
-    const body = bodyOf(src, fname);
+    let body;
+    try {
+      body = bodyOf(src, fname);
+    } catch (e) {
+      if (!(e instanceof ConciseArrowBodyError)) throw e;
+      // Same loud-failure treatment as a null body (below): an unparseable
+      // callee could hide any banned call, so it must never be skipped.
+      problems.push(`${entry} -> ${e.message}`);
+      continue;
+    }
     if (body === null) {
       // A function reachable from the entry point that this scanner cannot
       // parse must fail the gate loudly, not be silently skipped - an
@@ -205,7 +323,23 @@ for (const entry of ENTRIES) {
       if (re.test(body)) problems.push(`${entry} -> ${fname}: BANNED ${label}()`);
     }
     for (const name of declared) {
-      if (!seen.has(name) && new RegExp(`\\b${name}\\s*\\(`).test(body)) {
+      // Bare-word match, deliberately NOT requiring a following '(' - a
+      // callee passed by reference (`.forEach(mutateViaCallback)`,
+      // `.map(Number)`) is exactly as reachable as one that's called
+      // directly, and requiring '(' made the old regex blind to it (Gap
+      // B). This is intentionally over-approximate: matching a name that
+      // merely appears in a comment or string, not just a real reference,
+      // only causes the gate to scan *more* code, never less - the unsafe
+      // direction is a false negative, not a false positive.
+      //
+      // `seen` (not `body`) is what stops a function from re-enqueueing
+      // itself: `fname` is always added to `seen` before its body is ever
+      // scanned (either as the seed entry, or at the moment it was
+      // discovered as a callee below), so a bare mention of fname's own
+      // name inside its own body - self-recursion, a self-referential
+      // comment, whatever - is skipped by `!seen.has(name)` regardless of
+      // why it appears.
+      if (!seen.has(name) && new RegExp(`\\b${name}\\b`).test(body)) {
         seen.add(name); queue.push(name);
       }
     }
