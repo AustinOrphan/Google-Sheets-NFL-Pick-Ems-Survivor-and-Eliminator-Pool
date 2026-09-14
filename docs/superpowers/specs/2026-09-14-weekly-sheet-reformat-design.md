@@ -213,7 +213,8 @@ result — `setNumberFormat('##.#%')` must still apply.
 `applyFormatting` and everything it calls must never invoke:
 
 `setValue` · `setValues` · `setFormula` · `setFormulaR1C1` · `setFormulas` ·
-`clear()` · `clearContents` · `insertCheckboxes` · `adjustRows` · `adjustColumns` ·
+`setFormulasR1C1` · `clear(...)` with any arguments · `clearContent` (the Range method) ·
+`clearContents` (the Sheet method) · `insertCheckboxes` · `adjustRows` · `adjustColumns` ·
 `ss.setNamedRange`
 
 `clearFormat` is permitted and required. Enforce the list with a grep over the extracted
