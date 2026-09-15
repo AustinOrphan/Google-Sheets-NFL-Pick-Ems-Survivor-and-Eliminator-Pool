@@ -9807,6 +9807,260 @@ function allFormulasUpdate(ss){
 // WEEKLY SHEETS
 // ============================================================================================================================================
 
+// WEEKLY LAYOUT — pure geometry for a weekly sheet.
+// Given only the week, configuration, form data, member data, and whatever was observed on an
+// existing sheet, this returns every row index, column index, header/width/font array, and
+// per-matchup descriptor needed to both build and reformat a weekly sheet. It touches no
+// spreadsheet, so it can be unit-tested in isolation and reused by the reformat path.
+// Returns null when the requested week has no game plan.
+function computeWeeklyLayout(week,config,forms,memberData,observed) {
+
+  const gamePlan = forms?.[week]?.gamePlan;
+  if (!gamePlan) {
+    return null;
+  }
+
+  config = config || {};
+  memberData = memberData || {};
+  const observations = observed || {};
+
+  // Member names, in display order
+  let members = [];
+  if (Array.isArray(observations.memberNames)) {
+    // Reformat path: names already present on the sheet take precedence over stored member data
+    members = observations.memberNames.map(name => [name]);
+  } else if (observations.displayEmpty) {
+    members = memberData.memberOrder.map(id => [memberData.members[id]?.name]);
+  } else {
+    // Re-sorts based on memberOrder, then applies conversion to the name
+    const sortedRespondents = [...forms[week].respondents].sort((a, b) => {
+      const indexA = memberData.memberOrder.indexOf(a);
+      const indexB = memberData.memberOrder.indexOf(b);
+      const resolvedIndexA = indexA > -1 ? indexA : Infinity;
+      const resolvedIndexB = indexB > -1 ? indexB : Infinity;
+      return resolvedIndexA - resolvedIndexB;
+    });
+    members = sortedRespondents.map((id) => [memberData.members[id]?.name]);
+  }
+  const totalMembers = members.length;
+
+  const contests = gamePlan.games;
+  const matchups = contests.length;
+  const isAts = gamePlan.pickemsAts;
+
+  const diffCount = (totalMembers - 1) >= 5 ? 5 : (totalMembers - 1); // Number of results to display for most similar weekly picks (defaults to 5, or 1 fewer than the total member count, whichever is larger)
+
+  // ROW GEOMETRY
+  const matchupRow = 1; // Row for all matchups
+  const subHeaderRow = matchupRow + 1; // Row for denoting day of the week
+  const entryRowStart = subHeaderRow + 1; // Row of first user input on weekly sheet
+  const entryRowEnd = (entryRowStart - 1) + totalMembers; // Includes any header rows (entryRowStart-1) and adds two additional for final row of home/away splits and then bonus values
+  const summaryRow = entryRowEnd + 1; // Row for group averages (away/home) and other calculated values
+  const spreadRow = summaryRow + 1; // Recorded spreads (hidden if not ATS)
+  const outcomeRow = summaryRow + 2; // Row for matchup outcomes
+  const outcomeMarginRow = summaryRow + 3; // Row for margins
+  const spreadOutcomeRow = summaryRow + 4; // Row for determining which team was the correct pick when including the spread
+  const bonusRow = summaryRow + 5; // Row for adding bonus drop-downs
+  const rows = bonusRow; // Total row count for the sheet
+  const spreadToBonusRowCount = bonusRow - spreadRow; // Bottom area for use when highlighting for bonus presence
+  const numPlayers = entryRowEnd - entryRowStart + 1;
+
+  // Columns that only exist for certain configurations; -1/undefined mirrors the build path
+  let commentCol, paidCol, mnfCol, winCol, tiebreakerCol = -1;
+
+  // Notes and validations are collected as data here and applied once the grid has been sized
+  const notes = [];
+  const outcomeValidations = [];
+
+  // Leading fixed columns
+  const headers = [`WEEK ${week}`,'⭐','🥇','💯','🎲','📊'];
+  const subHeaders = [`${matchups} ${LEAGUE} Matchups`,'Picks','Rank','Percent','Chances','']; // One blank for sparkline cell, will be merged
+  const fontSizes = [18,16,16,16,16,16];
+  const subFontSizes = [9,7,7,7,7,7];
+  const widths = [130,50,50,50,50,50];
+
+  const pointsCol = subHeaders.indexOf('Picks') + 1;
+  const rankCol = subHeaders.indexOf('Rank') + 1;
+  const percentCol = subHeaders.indexOf('Percent') + 1;
+  const chancesCol = subHeaders.indexOf('Chances') + 1;
+  const sparklinesCol = subHeaders.indexOf('Chances') + 2;
+
+  // One column per matchup, headed 'AWAY' + '@' + 'HOME'
+  const firstMatchupCol = headers.length + 1;
+  const spreads = [], bonuses = [], mnfCols = [], matchupDescriptors = [];
+  const newMatchupMap = {};
+  let matchupCol = 1;
+  for ( let a in contests ) {
+    const day = contests[a].dayName;
+    const evening = contests[a].hour >= 17 ? true : false;
+    const away = contests[a].awayTeam;
+    const home = contests[a].homeTeam;
+    newMatchupMap[`${away} @ ${home}`] = matchupCol++;
+    // Establish start/stop of MNF games to record the tally
+    if ( day == 'Monday' && evening ) {
+      mnfCols.push(headers.length + 1);
+    }
+    subHeaders.push(contests[a].dayName);
+    spreads.push(contests[a].spread || '');
+    bonuses.push(contests[a].bonus);
+    headers.push(`${away}\n@${home}`);
+    widths.push(50);
+    fontSizes.push(10);
+    subFontSizes.push(7);
+    outcomeValidations.push({ col: headers.length, options: [away,home,'TIE'] });
+    // Day colours ride on the descriptor rather than a positional array so that formatting can be
+    // keyed by matchup identity when a sheet is reformatted
+    matchupDescriptors.push({
+      key: `${away} @ ${home}`,
+      col: firstMatchupCol + Number(a),
+      day: day,
+      dayFill: dayColorsFilledObj[day] || '#b0b0b0',
+      dayHeader: dayColorsObj[day] || '#e0e0e0',
+      away: away, home: home,
+      spread: contests[a].spread || '',
+      bonus: contests[a].bonus,
+      isMnf: (day === 'Monday' && contests[a].hour >= 17),
+    });
+  }
+
+  const finalMatchupCol = headers.length;
+
+  // Tiebreaker and its difference column
+  const tiebreakerInclude = config.tiebreakerInclude ? true : false;
+  if (tiebreakerInclude) {
+    headers.push('⚖️'); // Omitted if tiebreakers are removed
+    subHeaders.push(`Tiebreaker`);
+    widths.push(50);
+    fontSizes.push(16);
+    subFontSizes.push(7);
+    tiebreakerCol = headers.length;
+    headers.push('📏');
+    subHeaders.push(`Difference`);
+    widths.push(50);
+    fontSizes.push(16);
+    subFontSizes.push(7);
+    notes.push({ row: matchupRow, col: tiebreakerCol, text: `Displays each member's tiebreaker value provided as the combined score between the final game of the week` });
+    notes.push({ row: matchupRow, col: tiebreakerCol+1, text: `The net difference between tiebreaker submitted and actual tiebreaker (in row ${outcomeRow}, column ${tiebreakerCol})` });
+    notes.push({ row: outcomeRow, col: tiebreakerCol, text: `Enter the summed score of the outcome of the final game of the week in this cell to complete the week and designate a winner` });
+  }
+
+  headers.push('🏆');
+  subHeaders.push(`Win`); // Replaced with formula later
+  widths.push(50);
+  fontSizes.push(16);
+  subFontSizes.push(7);
+  winCol = headers.length;
+
+  const mnfInclude = (!config.mnfExclude && mnfCols.length > 0);
+  if (mnfInclude) {
+    headers.push('🌙');
+    subHeaders.push('MNF'); // Added if user wants a MNF competition included
+    widths.push(50);
+    fontSizes.push(16);
+    subFontSizes.push(7);
+    mnfCol = headers.length;
+    notes.push({ row: matchupRow, col: mnfCol, text: mnfCols.length > 1 ? `Displays number of correctly chosen MNF matchups of the possible ${mnfCols.length}` : `Displays whether the user correctly picked the MNF matchup` });
+  }
+
+  const commentsInclude = !config.commentsExclude;
+  if (commentsInclude) {
+    headers.push('💬');
+    subHeaders.push('Comments'); // Added to allow submissions to have amusing comments, if desired
+    widths.push(150);
+    fontSizes.push(16);
+    subFontSizes.push(7);
+    commentCol = headers.length;
+    notes.push({ row: matchupRow, col: commentCol, text: `Column for member comments from the week ${week} form` });
+  }
+
+  // Wildcard column
+  headers.push('🃏');
+  subHeaders.push('Wildcard');
+  widths.push(50);
+  fontSizes.push(16);
+  subFontSizes.push(7);
+  const wildcardCol = headers.length;
+  notes.push({ row: matchupRow, col: wildcardCol, text: `Represents the percent alignment to the median set of picks for week ${week}` });
+
+  // Cohesion block, diffCount columns wide and merged across both header rows
+  headers.push('🤝 COHESION');
+  subHeaders.push('How many picks you differ from other members');
+  const diffCol = headers.length;
+  let finalCol = diffCol + (diffCount-1);
+  // diffCount is 0 for a single-member pool, so the fill counts are clamped to keep Array() legal
+  const diffPadCount = Math.max(0, diffCount - 1);
+  const diffSpanCount = Math.max(0, diffCount);
+  headers.push(...Array(diffPadCount).fill(''));
+  subHeaders.push(...Array(diffPadCount).fill(''));
+  widths.push(...Array(diffSpanCount).fill(90));
+  fontSizes.push(...Array(diffSpanCount).fill(10));
+  subFontSizes.push(...Array(diffSpanCount).fill(7));
+  notes.push({ row: matchupRow, col: diffCol, text: `Displayed as the number of picks deviated from the next closests pickers` });
+
+  // Weekly checkboxes for payment status, if configured
+  const paidCheckboxes = config?.weeklyPaidTracking ? config.weeklyPaidTracking : false;
+  if (paidCheckboxes) {
+    headers.push('💵');
+    subHeaders.push(`Paid`);
+    widths.push(70);
+    fontSizes.push(16);
+    subFontSizes.push(9);
+    finalCol++;
+    paidCol = finalCol;
+    notes.push({ row: matchupRow, col: paidCol, text: `Tracking column for weekly payment status of members` });
+  }
+
+  const paid = {
+    summaryFormula: `=if(and(R${entryRowStart}C[0]:R${entryRowEnd}C[0]),"ALL PAID",if(arrayformula(and(NOT(R${entryRowStart}C[0]:R${entryRowEnd}C[0]))),"UNPAID",round(countif(R${entryRowStart}C[0]:R${entryRowEnd}C[0],true)/counta(R${entryRowStart}C[0]:R${entryRowEnd}C[0]),3)))`
+  };
+
+  // --- Configuration for Conditional Formatting ---
+  // Using an object for parity makes the code more self-documenting
+  const parities = {
+    even: { fn: 'iseven' },
+    odd:  { fn: 'isodd'  }
+  };
+
+  // --- Define the base formulas ONCE using supported functions ---
+  const outcomeRowRef = `INDIRECT("R${isAts ? spreadOutcomeRow : outcomeRow}C[0]", FALSE)`;
+  const thisCellRef = `INDIRECT("R[0]C[0]", FALSE)`;
+  const matchupRef = `INDIRECT("R${matchupRow}C[0]", FALSE)`;
+
+  const baseFormulas = {
+    // Correct picks are the highest priority. Checks if the pick matches the outcome.
+    correct: `AND(${outcomeRowRef}=${thisCellRef}, NOT(ISBLANK(${outcomeRowRef})))`,
+
+    // Incorrect picks are next. This is any cell in a completed game that isn't correct.
+    incorrect: `AND(${outcomeRowRef}<>${thisCellRef}, NOT(ISBLANK(${outcomeRowRef})), NOT(ISBLANK(${thisCellRef})))`,
+
+    // Home picks are for games not yet played.
+    // Formula: this cell's value = the text to the RIGHT of the "@" in the matchup row.
+    home: `AND(ISBLANK(${outcomeRowRef}), NOT(ISBLANK(${thisCellRef})), ${thisCellRef}=TRIM(RIGHT(${matchupRef}, LEN(${matchupRef})-FIND("@",${matchupRef}))))`,
+
+    // Away picks are for games not yet played.
+    // Formula: this cell's value = the text to the LEFT of the "@" in the matchup row.
+    away: `AND(ISBLANK(${outcomeRowRef}), NOT(ISBLANK(${thisCellRef})), ${thisCellRef}=TRIM(LEFT(${matchupRef}, FIND("@",${matchupRef})-1)))`
+  };
+
+  return {
+    week, config, isAts, diffCount,
+    members, totalMembers,
+    contests, matchups,
+    matchupRow, subHeaderRow, entryRowStart, entryRowEnd, summaryRow,
+    spreadRow, outcomeRow, outcomeMarginRow, spreadOutcomeRow, bonusRow,
+    rows, spreadToBonusRowCount, numPlayers,
+    firstMatchupCol, finalMatchupCol, finalCol,
+    pointsCol, rankCol, percentCol, chancesCol, sparklinesCol,
+    tiebreakerCol, mnfCol, mnfCols, commentCol, wildcardCol, diffCol, paidCol, winCol,
+    headers, subHeaders, widths, fontSizes, subFontSizes,
+    spreads, bonuses,
+    matchupDescriptors, newMatchupMap,
+    paidCheckboxes, tiebreakerInclude, commentsInclude, mnfInclude,
+    notes, outcomeValidations, paid,
+    parities, baseFormulas
+  };
+}
+
 // WEEKLY Sheet Function - creates a sheet with provided week, members [array], and if data should be restored
 function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   ss = ss || fetchSpreadsheet(ss);
@@ -9814,7 +10068,7 @@ function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   let docProps = (!config || !forms || !memberData) ? PropertiesService.getDocumentProperties() : null;
   forms = forms || JSON.parse(docProps.getProperty('forms')) || {};
 
-  if (!forms[week].gamePlan.pickemsInclude) {
+  if (!forms?.[week]?.gamePlan?.pickemsInclude) {
     Logger.log(`⭕ Pick 'Ems not included in week ${week} form response, no weekly sheet needed`);
     ss.toast(`⭕ Pick 'Ems not included in week ${week} form response, no weekly sheet needed`);
     return null;
