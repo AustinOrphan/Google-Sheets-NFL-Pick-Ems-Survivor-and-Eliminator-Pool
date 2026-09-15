@@ -3,6 +3,8 @@
 const { describe, it, assert } = require('./run.js');
 const { load } = require('./harness.js');
 
+const { weeklySheetPrefix } = load();
+
 function shapeFor(layout, over) {
   return Object.assign({
     sheetExists: true,
@@ -13,6 +15,7 @@ function shapeFor(layout, over) {
     namesStartRow: layout.entryRowStart,
     namesNumRows: layout.totalMembers,
     namesValues: layout.members.map(r => r[0]),
+    namesSheetName: `${weeklySheetPrefix}${layout.week}`,
   }, over || {});
 }
 
@@ -106,6 +109,22 @@ describe('compareWeeklyLayout', () => {
     const l = layout();
     const r = compareWeeklyLayout(l, shapeFor(l, { namesStartRow: l.entryRowStart + 1 }));
     assert.equal(r.reason, 'names-mismatch');
+  });
+
+  it('passes when namesSheetName matches the sheet under test', () => {
+    const l = layout();
+    const r = compareWeeklyLayout(l, shapeFor(l, { namesSheetName: `${weeklySheetPrefix}${l.week}` }));
+    assert.equal(r.ok, true);
+    assert.equal(r.reason, 'ready');
+  });
+
+  it('reports names-mismatch when NAMES_{week} points at a different sheet', () => {
+    const l = layout();
+    const r = compareWeeklyLayout(l, shapeFor(l, { namesSheetName: 'Some Other Sheet' }));
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'names-mismatch');
+    assert.ok(r.detail && r.detail.length > 10);
+    assert.match(r.detail, /NAMES_5/);
   });
 
   it('every failure carries a non-empty detail', () => {

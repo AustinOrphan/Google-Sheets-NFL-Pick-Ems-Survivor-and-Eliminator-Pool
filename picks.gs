@@ -10978,7 +10978,7 @@ function normalizeHeader(v) {
 // LAYOUT COMPARISON - Pure comparison of a computed layout against the observed shape of a sheet.
 // Returns a status; never throws, never touches SpreadsheetApp, so it is unit-testable in Node.
 // `sheetShape` is { sheetExists, maxRows, maxCols, headerRow, namesExists, namesStartRow,
-// namesNumRows, namesValues }. It is NOT called `observed` — that name already belongs to
+// namesNumRows, namesValues, namesSheetName }. It is NOT called `observed` — that name already belongs to
 // computeWeeklyLayout's fifth argument and means { displayEmpty, memberNames }.
 // Reasons returned: 'ready' | 'no-sheet' | 'row-mismatch' | 'col-mismatch' | 'drift' |
 // 'names-mismatch'. Missing checkbox validation is deliberately NOT a reason — requireCheckbox()
@@ -10993,6 +10993,15 @@ function compareWeeklyLayout(layout, sheetShape) {
   if (!sheetShape.namesExists) {
     return bail('names-mismatch',
       `NAMES_${wk} named range is missing. Run Check & Import Responses to rebuild the grid.`);
+  }
+  // Named ranges are spreadsheet-scoped, not sheet-scoped — they survive sheet renames and can
+  // be re-pointed by duplication. So NAMES_{week} can legitimately end up referring to a sheet
+  // other than the one under test, which would otherwise let its member list drive formatting
+  // for a different sheet than the one it was read from.
+  if (sheetShape.namesSheetName !== weeklySheetPrefix + wk) {
+    return bail('names-mismatch',
+      `NAMES_${wk} points at a different sheet ("${sheetShape.namesSheetName}") than ` +
+      `${weeklySheetPrefix}${wk}. Use Deploy / Refresh to rebuild the named range.`);
   }
   if (sheetShape.maxRows !== layout.rows) {
     return bail('row-mismatch',
@@ -11073,6 +11082,11 @@ function verifyWeeklyLayout(week, config, forms, memberData, ss) {
     }
 
     const namesRange = ss.getRangeByName(`NAMES_${week}`);
+    // Named ranges are spreadsheet-scoped, not sheet-scoped — NAMES_{week} can survive a sheet
+    // rename or get re-pointed by duplication, so it can legitimately end up referring to a
+    // different sheet than the one being verified. Captured here, before the values are read,
+    // so compareWeeklyLayout (the tested, pure function) is what actually decides the mismatch.
+    const namesSheetName = namesRange ? namesRange.getSheet().getName() : null;
     const namesValues = namesRange ? namesRange.getValues().map(r => r[0]) : [];
 
     // The sheet's own member list is authoritative for row geometry — the mode that built it
@@ -11096,6 +11110,7 @@ function verifyWeeklyLayout(week, config, forms, memberData, ss) {
       namesStartRow: namesRange ? namesRange.getRow() : -1,
       namesNumRows: namesRange ? namesRange.getNumRows() : -1,
       namesValues: namesValues,
+      namesSheetName: namesSheetName,
     };
 
     const result = compareWeeklyLayout(layout, sheetShape);
