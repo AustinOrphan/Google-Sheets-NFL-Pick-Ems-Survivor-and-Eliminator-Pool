@@ -65,3 +65,12 @@ Task 2: COMPLETE (commits 8c38376..9ecb36c, 2 fix passes, review fidelity-clean)
   'pure' (bans all Apps Script surface). computeWeeklyLayout registered as pure.
   Comment/string stripping before callee discovery killed the false-positive class;
   verified picks.gs:10052 still contains the word weeklySheet and the gate stays clean.
+Task 4: COMPLETE (commits ce00161..deeaa78, review APPROVED - fidelity clean, first-pass)
+  331 insertions / 0 deletions; weeklySheet untouched. All 20 named ranges match, formula
+  block byte-identical after stripping layout. prefix. 3 Minor (documentation only).
+  Fixed a 3rd pre-existing crash: MNF summary guard used mnfCols.length>0 while mnfCol is
+  only assigned under mnfInclude -> getRange(row, undefined) for any mnfExclude pool.
+  Established for Task 5: all 7 maxCols reads in the original occur AFTER the old
+  adjustColumns, so maxCols === finalCol at every one; layout.finalCol substitutes cleanly.
+  Also: the paid chain drops SIX formatting calls to Task 5, not four (brief prose said
+  four; plan Step 3 already carries all six).
