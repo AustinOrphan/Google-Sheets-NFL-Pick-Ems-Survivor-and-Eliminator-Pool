@@ -275,3 +275,19 @@ Task 13: COMPLETE - all automated gates green (34 tests, gate clean 3 entries, S
   9 follow-ups recorded in the spec. Manual checklist remains for the user.
 
 ALL 12 TASKS COMPLETE. Final whole-branch review next.
+
+FINAL WHOLE-BRANCH REVIEW: READY WITH CAVEATS -> 1 merge-gating fix applied + 3 minors.
+  I-1 (MINE, from spec §8): allFormulasUpdate wrote the paid formula using a layout
+  recomputed from TODAY's roster (memberNames:null) - the exact hazard finding 1 solved for
+  the reformat path, reintroduced in a function that WRITES. Reproduced: 4 of 5 roster
+  scenarios land on a member's paid checkbox. Now routed through verifyWeeklyLayout, which
+  derives members from NAMES_{week} and so resolves to the CORRECT cell, not merely refusing.
+  Per-task review could not catch this: it lives between two tasks' briefs.
+  Also: gate widened to 15 more value-destroying methods (uncheck/copyTo/sort/... - injection
+  proven); Logger.log(teamData) removed (576 lines per full-season panel run); showRows added
+  so re-enabling bonus/ATS un-hides the row (previously one-way, contradicting the premise).
+  NOT fixed, triaged as don't-fix: duplicate name scanners, RegExp escaping, scanner
+  destructuring gap, Task 2 coverage gaps, contests aliasing, TOTAL A2 label.
+
+BRANCH COMPLETE: 55 commits, 34 tests, gate clean (3 entries), tree clean.
+Manual verification remains with the user - it is the authoritative check.
