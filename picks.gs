@@ -9813,11 +9813,10 @@ function allFormulasUpdate(ss){
       for (const wk of Object.keys(formsData).map(Number).sort((a, b) => a - b)) {
         const wkSheet = ss.getSheetByName(`${weeklySheetPrefix}${wk}`);
         if (!wkSheet) continue;
-        const layout = computeWeeklyLayout(wk, config, formsData, memberData,
-          { displayEmpty: !config.hideNonParticipants, memberNames: null });
-        if (!layout || !layout.paidCheckboxes) continue;
-        wkSheet.getRange(layout.entryRowEnd + 1, layout.paidCol)
-               .setFormulaR1C1(layout.paid.summaryFormula);
+        const v = verifyWeeklyLayout(wk, config, formsData, memberData, ss);
+        if (!v.ok || !v.layout.paidCheckboxes) continue;
+        wkSheet.getRange(v.layout.entryRowEnd + 1, v.layout.paidCol)
+               .setFormulaR1C1(v.layout.paid.summaryFormula);
       }
     }
   }
