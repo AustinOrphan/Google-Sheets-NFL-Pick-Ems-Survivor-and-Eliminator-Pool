@@ -10388,9 +10388,14 @@ function writeWeeklyContent(sheet,layout,ss,rebuild,forms) {
     ss.setNamedRange(`MNF_${layout.week}`,range);
   }
 
-  // Paid checkboxes and the summary cell below them; the formatting of both is applied later
+  // Paid checkboxes and the summary cell below them; the formatting of both is applied later.
+  // insertCheckboxes() sets every cell in the range to false, so any paid status that existed
+  // before a rebuild is gone by this point; the named range is what lets remapAndRepopulateData
+  // put it back below, and what lets the next rebuild scrape it in the first place.
   if (layout.paidCheckboxes) {
-    sheet.getRange(layout.entryRowStart, layout.paidCol, layout.totalMembers, 1).insertCheckboxes();
+    const paidRange = sheet.getRange(layout.entryRowStart, layout.paidCol, layout.totalMembers, 1);
+    paidRange.insertCheckboxes();
+    ss.setNamedRange(`PAID_${layout.week}`, paidRange);
     sheet.getRange(layout.entryRowEnd + 1, layout.paidCol).setFormulaR1C1(layout.paid.summaryFormula);
   }
 
@@ -11458,6 +11463,17 @@ function getExistingWeeklySheetData(ss, week, forms) {
       Logger.log(`🚫 Comments range not found. Skipping preservation.`);
     }
 
+    // Paid status — optional, and keyed by name below so it survives the remap. The range is
+    // absent on sheets built before it was introduced, and whenever paid tracking is switched off.
+    let paidValues = [];
+    const paidRange = ss.getRangeByName(`PAID_${week}`);
+    if (paidRange) {
+      paidValues = paidRange.getValues();
+      Logger.log(`💵 Paid range found; preserving paid status.`);
+    } else {
+      Logger.log(`🚫 Paid range not found. Skipping preservation.`);
+    }
+
     // Use your mapping function to get the column order of the OLD games.
     data.oldMatchupMap = outcomeDataValidationMapping(week, forms, `${LEAGUE}_PICKEM_OUTCOMES_${week}`);
     if (!data.oldMatchupMap) {
@@ -11471,7 +11487,8 @@ function getExistingWeeklySheetData(ss, week, forms) {
         data.playerData[name] = {
           picks: picks[index] || [],
           tiebreaker: tiebreakers[index] ? tiebreakers[index][0] : '',
-          comment: comments[index] ? comments[index][0] : ''
+          comment: comments[index] ? comments[index][0] : '',
+          paid: paidValues[index] ? paidValues[index][0] === true : false
         };
       }
     });
@@ -11558,6 +11575,29 @@ function remapAndRepopulateData(ss, week, existingData, newMatchupMap, newMember
   ss.getRangeByName(`${LEAGUE}_PICKS_${week}`)?.setValues(newPicks);
   ss.getRangeByName(`${LEAGUE}_TIEBREAKER_${week}`)?.setValues(newTiebreakers);
   ss.getRangeByName(`COMMENTS_${week}`)?.setValues(newComments);
+
+  // Paid status, restored by member NAME rather than by old row index: the member list changing
+  // is the reason this rebuild is running, so the old indexes point at the wrong people.
+  // insertCheckboxes() has already set every paid cell to false, so only true is written back —
+  // members who were unticked, and members who are new this week, correctly stay unticked.
+  const paidRange = ss.getRangeByName(`PAID_${week}`);
+  if (paidRange) {
+    const currentPaid = paidRange.getValues();
+    const restoredPaid = [];
+    for (const playerName in playerData) {
+      if (playerData[playerName].paid !== true) continue;
+      if (!newMemberMap.hasOwnProperty(playerName)) continue;
+      const newIndex = newMemberMap[playerName];
+      // A cell that does not read exactly false is not a freshly inserted, unticked checkbox, so
+      // leave it alone rather than write true through a stale or mis-sized named range.
+      if (!currentPaid[newIndex] || currentPaid[newIndex][0] !== false) continue;
+      paidRange.getCell(newIndex + 1, 1).setValue(true);
+      restoredPaid.push(playerName);
+    }
+    Logger.log(`💵 Restored paid status for ${restoredPaid.length} member(s): ${restoredPaid.join(', ') || 'none'}`);
+  } else {
+    Logger.log(`🚫 Paid range not found. Skipping paid status restore.`);
+  }
 
   // --- Part 2: Remap and Repopulate Admin Data (Outcomes, Spreads, etc.) ---
   const newOutcomes = [];
