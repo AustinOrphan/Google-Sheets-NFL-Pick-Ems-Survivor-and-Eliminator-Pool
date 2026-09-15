@@ -11135,9 +11135,26 @@ function reformatWeeklySheet(week, ss, config, forms, memberData) {
   ss = ss || fetchSpreadsheet(ss);
   const docProps = (!config || !forms || !memberData)
     ? PropertiesService.getDocumentProperties() : null;
-  config = config || JSON.parse(docProps.getProperty('configuration')) || {};
-  forms = forms || JSON.parse(docProps.getProperty('forms')) || {};
-  memberData = memberData || JSON.parse(docProps.getProperty('members')) || {};
+  // Parses a stored document property by name, tagging any JSON error with the property
+  // name so a corrupt property reports which one instead of throwing out of a function
+  // contracted to never throw.
+  const parseDocProp = (name) => {
+    try {
+      return JSON.parse(docProps.getProperty(name));
+    } catch (err) {
+      throw new Error(`"${name}" document property is not valid JSON (${err.message})`);
+    }
+  };
+  try {
+    config = config || parseDocProp('configuration') || {};
+    forms = forms || parseDocProp('forms') || {};
+    memberData = memberData || parseDocProp('members') || {};
+  } catch (err) {
+    Logger.log(`⛔ Week ${week} not reformatted [error]: ${err.message}`);
+    return { week: week, ok: false, reason: 'error',
+             detail: `Week ${week} could not be reformatted: ${err.message}. ` +
+                     `Re-run Configuration from the Picks menu.` };
+  }
 
   const v = verifyWeeklyLayout(week, config, forms, memberData, ss);
   if (!v.ok) {
