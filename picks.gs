@@ -11126,6 +11126,38 @@ function verifyWeeklyLayout(week, config, forms, memberData, ss) {
   }
 }
 
+/**
+ * Reapplies generated formatting to one weekly sheet.
+ * Never clears the sheet, never writes a value or formula, never resizes the
+ * grid, never re-points a named range. Aborts rather than guessing.
+ */
+function reformatWeeklySheet(week, ss, config, forms, memberData) {
+  ss = ss || fetchSpreadsheet(ss);
+  const docProps = (!config || !forms || !memberData)
+    ? PropertiesService.getDocumentProperties() : null;
+  config = config || JSON.parse(docProps.getProperty('configuration')) || {};
+  forms = forms || JSON.parse(docProps.getProperty('forms')) || {};
+  memberData = memberData || JSON.parse(docProps.getProperty('members')) || {};
+
+  const v = verifyWeeklyLayout(week, config, forms, memberData, ss);
+  if (!v.ok) {
+    Logger.log(`⛔ Week ${week} not reformatted [${v.reason}]: ${v.detail}`);
+    return { week: week, ok: false, reason: v.reason, detail: v.detail };
+  }
+
+  try {
+    applyWeeklyFormatting(v.sheet, v.layout);
+  } catch (err) {
+    Logger.log(`⛔ Week ${week} reformat failed: ${err.message}`);
+    return { week: week, ok: false, reason: 'error',
+             detail: `Week ${week} formatting failed: ${err.message}` };
+  }
+
+  Logger.log(`🎨 Week ${week} formatting reapplied.`);
+  return { week: week, ok: true, reason: 'ready',
+           detail: `Week ${week} formatting reapplied.` };
+}
+
 // WEEKLY Sheet Function - creates a sheet with provided week, members [array], and if data should be restored
 function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   ss = ss || fetchSpreadsheet(ss);
