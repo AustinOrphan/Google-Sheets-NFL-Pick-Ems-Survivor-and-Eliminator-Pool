@@ -146,6 +146,10 @@ function onOpen() {
         .addItem('🧮 Update Formulas', 'allFormulasUpdate')
         .addItem('✅ Update Outcomes Sheet Validation', 'outcomesSheetUpdatePrompt');
 
+      if (config.pickemsInclude) {
+        utilMenu.addItem('🎨 Reapply Formatting', 'launchReformatPanel');
+      }
+
       if (config.survivorInclude) {
         utilMenu.addSeparator()
                 .addItem('👑 Rebuild Survivor Sheet', 'rebuildSurvivorSheet');
