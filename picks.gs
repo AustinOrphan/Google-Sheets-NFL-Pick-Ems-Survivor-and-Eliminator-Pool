@@ -10988,7 +10988,8 @@ function compareWeeklyLayout(layout, sheetShape) {
   const bail = (reason, detail) => ({ ok: false, reason: reason, detail: detail });
 
   if (!sheetShape.sheetExists) {
-    return bail('no-sheet', `No ${weeklySheetPrefix}${wk} sheet exists.`);
+    return bail('no-sheet',
+      `No ${weeklySheetPrefix}${wk} sheet exists. Run Check & Import Responses to create it.`);
   }
   if (!sheetShape.namesExists) {
     return bail('names-mismatch',
@@ -11078,7 +11079,8 @@ function verifyWeeklyLayout(week, config, forms, memberData, ss) {
     const sheet = ss.getSheetByName(`${weeklySheetPrefix}${week}`);
     if (!sheet) {
       return { ok: false, reason: 'no-sheet', sheet: null, layout: null,
-               detail: `No ${weeklySheetPrefix}${week} sheet exists.` };
+               detail: `No ${weeklySheetPrefix}${week} sheet exists. ` +
+                       `Run Check & Import Responses to create it.` };
     }
 
     const namesRange = ss.getRangeByName(`NAMES_${week}`);
@@ -11098,7 +11100,8 @@ function verifyWeeklyLayout(week, config, forms, memberData, ss) {
     });
     if (!layout) {
       return { ok: false, reason: 'no-form-data', sheet: sheet, layout: null,
-               detail: `Week ${week} has no form data, so there is no layout to apply.` };
+               detail: `Week ${week} has no form data, so no layout can be computed. ` +
+                       `Nothing to reformat.` };
     }
 
     const sheetShape = {
@@ -11118,7 +11121,8 @@ function verifyWeeklyLayout(week, config, forms, memberData, ss) {
              sheet: sheet, layout: layout };
   } catch (err) {
     return { ok: false, reason: 'error', sheet: null, layout: null,
-             detail: `Week ${week} could not be checked: ${err.message}` };
+             detail: `Week ${week} could not be checked: ${err.message}. ` +
+                     `Check the Apps Script execution log for details.` };
   }
 }
 

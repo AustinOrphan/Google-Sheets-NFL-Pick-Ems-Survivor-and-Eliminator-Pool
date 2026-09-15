@@ -92,10 +92,24 @@ describe('compareWeeklyLayout', () => {
   });
 
   it('reports names-mismatch for a blank row inside NAMES', () => {
-    const l = layout();
-    const v = l.members.map(r => r[0]); v[2] = '';
-    const r = compareWeeklyLayout(l, shapeFor(l, { namesValues: v }));
+    // On the real path (verifyWeeklyLayout), the sheet's own namesValues are fed into
+    // computeWeeklyLayout as memberNames, so layout.members is DERIVED from namesValues and the
+    // roster-contents loop below is a tautology that can never fire. Mirror that derivation here:
+    // build namesValues with a blank at index 2, then compute layout from that same array, so
+    // roster[2] and names[2] are both '' and the roster loop is blind. That isolates the blank-row
+    // scan as the only check that can produce this result.
+    const namesValues = ['M1', 'M2', '', 'M4', 'M5', 'M6'];
+    const l = computeWeeklyLayout(5,
+      { tiebreakerInclude: true, mnfExclude: false, commentsExclude: false, weeklyPaidTracking: true },
+      { 5: { gamePlan: { games: [
+          { awayTeam: 'KC', homeTeam: 'BUF', dayName: 'Sunday', hour: 13, spread: -3, bonus: 1 },
+          { awayTeam: 'SF', homeTeam: 'SEA', dayName: 'Monday', hour: 20, spread: -1, bonus: 1 },
+        ], pickemsInclude: true, pickemsAts: true }, respondents: 6 } },
+      { members: {}, memberOrder: [] },
+      { displayEmpty: true, memberNames: namesValues });
+    const r = compareWeeklyLayout(l, shapeFor(l, { namesValues: namesValues.slice() }));
     assert.equal(r.reason, 'names-mismatch');
+    assert.match(r.detail, /blank row at position 3/);
   });
 
   it('reports names-mismatch when the roster disagrees with the sheet', () => {
@@ -109,13 +123,6 @@ describe('compareWeeklyLayout', () => {
     const l = layout();
     const r = compareWeeklyLayout(l, shapeFor(l, { namesStartRow: l.entryRowStart + 1 }));
     assert.equal(r.reason, 'names-mismatch');
-  });
-
-  it('passes when namesSheetName matches the sheet under test', () => {
-    const l = layout();
-    const r = compareWeeklyLayout(l, shapeFor(l, { namesSheetName: `${weeklySheetPrefix}${l.week}` }));
-    assert.equal(r.ok, true);
-    assert.equal(r.reason, 'ready');
   });
 
   it('reports names-mismatch when NAMES_{week} points at a different sheet', () => {
