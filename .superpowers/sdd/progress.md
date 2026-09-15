@@ -223,3 +223,21 @@ Task 10: COMPLETE (commit fb6f340) - menu item, gated on config.pickemsInclude, 
   the repair tools (Update Formulas / Outcomes Validation), before the rebuild tools.
   NO separate review dispatched - single verified line; deliberate proportionality call,
   covered by the mandatory final whole-branch review. Menu render is PENDING manual.
+Task 11: COMPLETE (commits 56f7ec8..61067ee, 1 test addition + 1 fix pass, review APPROVED)
+  Step 1 decision: ONE parameterized trio via SIMPLE_SHEET_SPECS, with the genuinely-different
+  conditional-format rules isolated in an explicit 3-way branch rather than forced into data.
+  Equivalence proven TWICE by independent recording fakes (implementer's + reviewer's own):
+  4 sheets x 5 member counts x 10 grid scenarios x 3 week configs, all identical; differ
+  mutation-proved 6/6. MNF unchanged (regression check).
+  My brief's spec table was substantially WRONG - values came from dead code. Corrected:
+  RANKS not RANK, PERCENTAGES not PERCENT, TOT weekFormat #0 / overallFormat ##, separate
+  averages-row formats, RNK has NO averages row. Critically the named ranges are TOT-prefixed
+  for RNK and PCT (TOT_OVERALL_RANK, TOT_WEEKLY_PCT...) - my rangePrefix sketch would have
+  renamed them and silently broken every INDIRECT lookup on the season sheets.
+  Fix pass: spec-wiring test was 4/7 TAUTOLOGY (layout.spec IS SIMPLE_SHEET_SPECS[key], same
+  object ref) so it could not pin the named ranges it existed to pin. Now hardcoded literals,
+  mutation-proven. THIRD instance this session of a test that asserted nothing.
+  Accepted: Update Formulas no longer repairs TOT/RNK/PCT number formats (one owner per
+  concern); Deploy/Refresh still does.
+  Follow-up: TOTAL writes 'AVERAGES' to A2 which member names overwrite -> averages row
+  unlabelled. Pre-existing, one-word fix, out of scope.
