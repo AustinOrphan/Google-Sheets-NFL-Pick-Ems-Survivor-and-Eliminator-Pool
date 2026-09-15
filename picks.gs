@@ -10408,6 +10408,562 @@ function writeWeeklyContent(sheet,layout,ss,rebuild) {
   return { sheet, existingData, newMatchupMap };
 }
 
+// WEEKLY FORMATTING — every conditional rule, colour, number format, note, validation, column
+// width, row height and merge on a weekly sheet, and nothing that writes a cell value. Safe to
+// re-run over a populated sheet: it opens with clearFormat() rather than clear(), breaks merges
+// before re-merging (clearFormat does not unmerge), and re-asserts the paid checkbox validation
+// instead of calling insertCheckboxes(), which would reset every paid cell to false. Tab colour
+// is spreadsheet-scoped — weeklySheetTabColors repaints every weekly tab — so it stays in
+// weeklySheet rather than here.
+function applyWeeklyFormatting(sheet,layout) {
+
+  // The only thing that removes stale formatting now that clear() belongs to the write path.
+  sheet.getRange(1,1,layout.rows,layout.finalCol).clearFormat();
+
+  const formatRules = [];
+  let range;
+
+  // Notes are collected by computeWeeklyLayout and applied here, after the grid has been sized
+  layout.notes.forEach(n => sheet.getRange(n.row,n.col).setNote(n.text));
+
+  // Day coloration of each matchup's sub-header cell, keyed by matchup identity rather than by
+  // position, so every matchup column gets its own rule
+  layout.matchupDescriptors.forEach(d => {
+    formatRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=not(isblank(indirect("R${layout.outcomeRow}C[0]",false)))`)
+      .setBackground(d.dayFill)
+      .setBold(true)
+      .setRanges([sheet.getRange(layout.subHeaderRow,d.col)])
+      .build());
+  });
+
+  // Set Data validation for each matchup winner
+  layout.outcomeValidations.forEach(v =>
+    sheet.getRange(layout.outcomeRow,v.col).setDataValidation(
+      SpreadsheetApp.newDataValidation().requireValueInList(v.options, true).build()));
+
+  // Set Data validation for margin
+  sheet.getRange(layout.outcomeMarginRow,layout.firstMatchupCol,1,layout.matchups).setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(Array.from({ length: 46 }, (_, index) => index), true).build());
+
+  // Set Bonus validation
+  let bonusRange = sheet.getRange(layout.bonusRow,layout.firstMatchupCol,1,layout.matchups);
+  let rule = SpreadsheetApp.newDataValidation().requireValueInList(['1','2','3'],true).build();
+  bonusRange.setDataValidation(rule);
+
+  sheet.getRange(layout.entryRowStart, 1, layout.numPlayers, layout.finalCol)
+       .setBorder(null, null, true, null, false, true, '#AAAAAA', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+
+  // --- Configuration for Conditional Formatting ---
+  const bonusCount = 3;
+  const parities = layout.parities;
+
+  // --- Define the base formulas ONCE using supported functions ---
+  const thisRowRef = `INDIRECT("R[0]C1", FALSE)`;
+  const bonusRef = `INDIRECT("R${layout.bonusRow}C[0]", FALSE)`;
+  const baseFormulas = layout.baseFormulas;
+  // The six fixed leading columns, i.e. subHeaders.length before the matchups were appended
+  const subHeadersPriorLength = layout.firstMatchupCol - 1;
+  const allPicksRange = `R${layout.entryRowStart}C${layout.firstMatchupCol}:R${layout.entryRowEnd}C${layout.finalMatchupCol}`;
+
+  // --- Programmatically Generate and Apply Formatting Rules ---
+  range = sheet.getRange(allPicksRange);
+
+  // Uses top-level pickColors object
+  // Rules are evaluated from top to bottom. `correct` and `incorrect` must come first.
+
+  // Evaluate from top to bottom: Correct -> Incorrect -> Home -> Away
+  for (const [type, cfg] of Object.entries(pickColors)) {
+    for (const parity of Object.values(parities)) {
+      const startColor = parity.fn === 'iseven' ? cfg.even : cfg.odd;
+      const gradient = typeof hexGradient === 'function'
+        ? hexGradient(startColor, cfg.end, bonusCount)
+        : [startColor];
+
+      // Loop backwards so higher bonus tiers evaluate first
+      for (let i = gradient.length - 1; i >= 0; i--) {
+        const bonusLevel = i + 1;
+        const baseFormula = baseFormulas[type];
+        const parityCondition = `${parity.fn}(ROW(${thisRowRef}))`;
+
+        let finalFormula = `=AND(${baseFormula}, ${parityCondition}`;
+        if (i > 0) {
+          finalFormula += `, ${bonusRef}=${bonusLevel}`;
+        }
+        finalFormula += `)`;
+
+        const ruleBuilder = SpreadsheetApp.newConditionalFormatRule()
+          .whenFormulaSatisfied(finalFormula)
+          .setBackground(gradient[i])
+          .setRanges([range]);
+
+        if (cfg.font) {
+          ruleBuilder.setFontColor(cfg.font);
+        }
+
+        formatRules.push(ruleBuilder.build());
+      }
+    }
+  }
+
+  // TOTALS GRADIENT RULE
+  range = sheet.getRange(layout.entryRowStart,layout.pointsCol,layout.totalMembers,1);
+  let formatRuleTotals = SpreadsheetApp.newConditionalFormatRule()
+    .setGradientMaxpoint('#75F0A1')
+    .setGradientMinpoint('#FFFFFF')
+    .setRanges([range])
+    .build();
+  formatRules.push(formatRuleTotals);
+  // RANKS GRADIENT RULE
+  range = sheet.getRange(layout.entryRowStart,layout.rankCol,layout.totalMembers,1);
+  let formatRuleRanks = SpreadsheetApp.newConditionalFormatRule()
+    .setGradientMaxpointWithValue('#FF9B69', SpreadsheetApp.InterpolationType.NUMBER, layout.members.length)
+    .setGradientMidpointWithValue('#FFFFFF', SpreadsheetApp.InterpolationType.NUMBER, layout.members.length/2)
+    .setGradientMinpointWithValue('#5EDCFF', SpreadsheetApp.InterpolationType.NUMBER, 1)
+    .setRanges([range])
+    .build();
+  formatRules.push(formatRuleRanks);
+  // PERCENT GRADIENT RULE
+  sheet.getRange(layout.entryRowStart,layout.percentCol,layout.totalMembers+1,1).setNumberFormat('##0.0%');
+  formatRules.push(SpreadsheetApp.newConditionalFormatRule()
+    .setGradientMaxpointWithValue('#75F0A1', SpreadsheetApp.InterpolationType.NUMBER, '.70')
+    .setGradientMidpointWithValue('#FFFFFF', SpreadsheetApp.InterpolationType.NUMBER, '.60')
+    .setGradientMinpointWithValue('#FF9B69', SpreadsheetApp.InterpolationType.NUMBER, '.50')
+    .setRanges([sheet.getRange(layout.entryRowStart,layout.percentCol,layout.totalMembers+1,1)])
+    .build());
+  
+  // CHANCES GRADIENT RULE  '#33ff7a',IF(E3<0.33,'#ffa579','#ffe433')
+  range =  sheet.getRange(layout.entryRowStart,layout.chancesCol,layout.totalMembers,1);
+  range.setNumberFormat('##0.0%');
+  formatRules.push(SpreadsheetApp.newConditionalFormatRule()
+    .setGradientMaxpoint('#33ff7a')
+    .setGradientMidpointWithValue('#ffe433', SpreadsheetApp.InterpolationType.PERCENT, '50')
+    .setGradientMinpoint('#ffa579')
+    .setRanges([range])
+    .build());
+
+  // WILDCARD GRADIENT RULE
+  const wildcardWithSummaryRange = sheet.getRange(layout.entryRowStart, layout.wildcardCol, layout.totalMembers + 1, 1);
+  
+  wildcardWithSummaryRange.setNumberFormat('0.0%');
+
+  let formatRuleWildcard = SpreadsheetApp.newConditionalFormatRule()
+    .setGradientMaxpointWithValue('#fca503', SpreadsheetApp.InterpolationType.NUMBER, '0.50')
+    .setGradientMidpointWithValue('#ffe433', SpreadsheetApp.InterpolationType.NUMBER, '0.25')
+    .setGradientMinpointWithValue('#7dfffb', SpreadsheetApp.InterpolationType.NUMBER, '0.00')
+    .setRanges([wildcardWithSummaryRange])
+    .build();
+  formatRules.push(formatRuleWildcard);
+
+  // WINNER COLUMN RULE
+  range = sheet.getRange(layout.entryRowStart,layout.winCol,layout.totalMembers,1);
+  let formatRuleNotWinner = SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberNotEqualTo(1)
+    .setBackground('#FFFFFF')
+    .setFontColor('#FFFFFF')
+    .setRanges([range])
+    .build();     
+  formatRules.push(formatRuleNotWinner);
+  let formatRuleWinner = SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberEqualTo(1)
+    .setBackground('#75F0A1')
+    .setFontColor('#75F0A1')
+    .setRanges([range])
+    .build();
+  formatRules.push(formatRuleWinner);  
+  // WINNER NAME RULE
+  range = sheet.getRange(layout.entryRowStart,layout.winCol,layout.totalMembers,1);
+  let formatRuleWinnerName = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(`=indirect("R[0]C${layout.winCol}",false)=1`)
+    .setBackground('#75F0A1')
+    .setRanges([range])
+    .build();
+  formatRules.push(formatRuleWinnerName);
+
+  // MNF GRADIENT RULE
+  if (layout.mnfInclude) {
+    range = sheet.getRange(layout.entryRowStart,layout.mnfCol,layout.totalMembers,1);
+    // formatRuleMNFEmpty = SpreadsheetApp.newConditionalFormatRule()
+    //   .whenCellEmpty()
+    //   .setFontColor('#FFFFFF')
+    //   .setBackground('#FFFFFF')
+    //   .setRanges([range])
+    //   .build();
+    // formatRules.push(formatRuleMNFEmpty);
+    formatRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenNumberLessThan(1)
+      .setFontColor('#FFFFFF')
+      .setBackground('#FFFFFF')
+      .setRanges([range])
+      .build());
+    if (layout.mnfCols.length > 1) { // Rules for when there are multiple MNF games
+      formatRules.push(SpreadsheetApp.newConditionalFormatRule()
+        .setGradientMaxpoint("#FFF624") // Max value of all correct picks, min 1
+        .setGradientMinpoint("#FFFFFF") // Min value of all correct picks  
+        .setRanges([range])
+        .build());
+    } else { // Rules for single MNF game 
+      formatRules.push(SpreadsheetApp.newConditionalFormatRule()
+        .setBackground("#FFF624")
+        .setFontColor("#FFF624")
+        .whenNumberEqualTo(1)
+        .setRanges([range])
+        .build());
+    }
+  }
+
+  // DIFFERENCE TIEBREAKER COLUMN FORMATTING
+  if (layout.tiebreakerInclude) {
+    let offsets = [1,3,5,10,15,20,20];
+    let offsetColors = hexGradient('#33FF7A','#FFFFFF',offsets.length);
+    for (let a = 0; a < offsets.length; a++) {
+      let rule;
+      if (a < (offsets.length - 1)) {
+        rule = SpreadsheetApp.newConditionalFormatRule()
+          .whenFormulaSatisfied(`=if(not(isblank(indirect("R${layout.outcomeRow}C[0]",false))),abs(indirect("R[0]C[0]",false)-indirect("R${layout.outcomeRow}C[0]:R${layout.outcomeRow}C[0]",false))<=${offsets[a]},)`)
+          .setBackground(offsetColors[a])
+          .setRanges([sheet.getRange(layout.entryRowStart,layout.tiebreakerCol,layout.totalMembers,1)])
+          .build();
+      } else {
+        rule = SpreadsheetApp.newConditionalFormatRule()
+          .whenFormulaSatisfied(`=if(not(isblank(indirect("R${layout.outcomeRow}C[0]",false))),abs(indirect("R[0]C[0]",false)-indirect("R${layout.outcomeRow}C[0]:R${layout.outcomeRow}C[0]",false))>${offsets[a]},)`)
+          .setBackground(offsetColors[a])
+          .setRanges([sheet.getRange(layout.entryRowStart,layout.tiebreakerCol,layout.totalMembers,1)])
+          .build();        
+      }
+      formatRules.push(rule);
+      rule = SpreadsheetApp.newConditionalFormatRule()
+        .whenFormulaSatisfied(`=if(not(isblank(indirect("R${layout.outcomeRow}C[0]",false))),abs(value(regexextract(indirect("R[0]C[0]",false),"[0-9]+"))-indirect("R${layout.outcomeRow}C[0]:R${layout.outcomeRow}C[0]",false))<=${offsets[a]},)`)
+        .setBackground(offsetColors[a])
+        .setRanges([sheet.getRange(layout.summaryRow,layout.tiebreakerCol)])
+        .build();
+      formatRules.push(rule);
+    }
+    offsetColors = hexGradient('#FFFFFF','#666666',offsets.length);
+    for (let a = 0; a < offsets.length; a++) {
+      let rule;
+      let ruleOffsets;
+      if (a < (offsets.length - 1)) {
+        rule = SpreadsheetApp.newConditionalFormatRule()
+          .whenFormulaSatisfied(`=if(not(isblank(indirect("R${layout.outcomeRow}C[-1]",false))),indirect("R[0]C[0]",false)<=${offsets[a]},)`)
+          .setBackground(offsetColors[a])
+          .setRanges([sheet.getRange(layout.entryRowStart,layout.tiebreakerCol+1,layout.totalMembers,1)])
+          .build();
+        ruleOffsets = SpreadsheetApp.newConditionalFormatRule()
+          .whenFormulaSatisfied(`=if(not(isblank(indirect("R${layout.outcomeRow}C[-1]",false))),value(regexextract(indirect("R[0]C[0]",false),"[0-9]+"))<=${offsets[a]},)`)
+          .setBackground(offsetColors[a])
+          .setRanges([sheet.getRange(layout.summaryRow,layout.tiebreakerCol+1)])
+          .build();
+      } else {
+        rule = SpreadsheetApp.newConditionalFormatRule()
+          .whenFormulaSatisfied(`=if(not(isblank(indirect("R${layout.outcomeRow}C[-1]",false))),indirect("R[0]C[0]",false)>${offsets[a]},)`)
+          .setBackground(offsetColors[a])
+          .setRanges([sheet.getRange(layout.entryRowStart,layout.tiebreakerCol+1,layout.totalMembers,1)])
+          .build();
+        ruleOffsets = SpreadsheetApp.newConditionalFormatRule()
+          .whenFormulaSatisfied(`=if(not(isblank(indirect("R${layout.outcomeRow}C[-1]",false))),value(regexextract(indirect("R[0]C[0]",false),"[0-9]+"))>${offsets[a]},)`)
+          .setBackground(offsetColors[a])
+          .setRanges([sheet.getRange(layout.summaryRow,layout.tiebreakerCol+1)])
+          .build();              
+      }
+      formatRules.push(rule);
+      formatRules.push(ruleOffsets);
+    }
+    // ADD ADDITIONAL COLOR VARIATION BASED ON TIEBREAKER VALUE PRESENT HERE
+    let formatRuleTiebreakerEmptyAndDone = SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=and(isblank(indirect("R[0]C[0]",false)),counta(indirect("R${layout.outcomeRow}C${layout.firstMatchupCol}:R${layout.outcomeRow}C${layout.finalMatchupCol}",false))>=columns(indirect("R${layout.outcomeRow}C${layout.firstMatchupCol}:R${layout.outcomeRow}C${layout.finalMatchupCol}",false)))`)
+      .setBackground("#FF3FC7")
+      .setRanges([sheet.getRange(layout.outcomeRow,layout.tiebreakerCol)])
+      .build();
+    formatRules.push(formatRuleTiebreakerEmptyAndDone);
+    let formatRuleTiebreakerEmpty = SpreadsheetApp.newConditionalFormatRule()
+      .whenCellEmpty()
+      .setBackground("#CCCCCC")
+      .setRanges([sheet.getRange(layout.outcomeRow,layout.tiebreakerCol)])
+      .build();
+    formatRules.push(formatRuleTiebreakerEmpty);
+    range = sheet.getRange(layout.entryRowStart,layout.tiebreakerCol,layout.totalMembers,1);
+    let formatRuleDiff = SpreadsheetApp.newConditionalFormatRule()
+      .setGradientMaxpoint("#B7B7B7")
+      .setGradientMinpoint("#FFFFFF")
+      .setRanges([range])
+      .build();
+    formatRules.push(formatRuleDiff);
+  }
+
+  // PREFERENCE COLOR SCHEMES
+  let awayFormula = `=and(regexextract(indirect("R[0]C[0]",false),"[A-Z]{2,3}")=regexextract(indirect("R${layout.matchupRow}C[0]",false),"[A-Z]{2,3}"),value(regexextract(indirect("R[0]C[0]",false),"[0-9\.]+"))>=%%)`;
+  let homeFormula = `=and(regexextract(indirect("R[0]C[0]",false),"[A-Z]{2,3}")=regexextract(right(indirect("R${layout.matchupRow}C[0]",false),3),"[A-Z]{2,3}"),value(regexextract(indirect("R[0]C[0]",false),"[0-9\.]+"))>=%%)`;
+  
+  // Explicitly define preferenceRange
+  const preferenceRange = sheet.getRange(layout.summaryRow, layout.firstMatchupCol, 1, layout.matchups);
+  
+  homeAwayColors.forEach(rule => {
+    formatRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(awayFormula.replace('%%', rule.percent))
+      .setBackground(rule.away)
+      .setRanges([preferenceRange])
+      .build());
+
+    formatRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(homeFormula.replace('%%', rule.percent))
+      .setBackground(rule.home)
+      .setRanges([preferenceRange])
+      .build());    
+  });
+
+  // MATCHUP WEIGHTING RULE
+  let formatRuleWeightedThree, formatRuleWeightedTwo;
+  const topBonusHighlightRange = sheet.getRange(layout.matchupRow,layout.firstMatchupCol,1,layout.matchups); // Top Bar of matchups
+  const bottomBonusHighlightRange = sheet.getRange(layout.spreadRow,layout.firstMatchupCol,layout.spreadToBonusRowCount,layout.matchups); // final rows of Spread, Winner, Margin, ATS Winner, & Bonus
+  formatRuleWeightedThree = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(`=and(not(isblank(indirect("R[0]C[0]",false))),or(and(indirect("R${layout.bonusRow}C[0]",false)=2,countif(indirect("R${layout.bonusRow}C${layout.firstMatchupCol}:R${layout.bonusRow}C${layout.finalMatchupCol}",false),3)=0),indirect("R${layout.bonusRow}C[0]",false)=3))`)
+    .setBackground('#9C9C97')
+    .setRanges([topBonusHighlightRange, bottomBonusHighlightRange]) // LEGACY VERSION sheet.getRange(`R${matchupRow}C${firstMatchupCol}:R${matchupRow}C${finalMatchupCol}`),sheet.getRange(`R${spreadRow}C${firstMatchupCol}:R${bonusRow}C${finalMatchupCol}`)])
+    .build();
+  formatRules.push(formatRuleWeightedThree);
+  formatRuleWeightedTwo = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(`=and(not(isblank(indirect("R[0]C[0]",false))),indirect("R${layout.bonusRow}C[0]",false)=2)`)
+    .setBackground('#949376')
+    .setRanges([topBonusHighlightRange, bottomBonusHighlightRange]) // LEGACY VERSION sheet.getRange(`R${matchupRow}C${firstMatchupCol}:R${matchupRow}C${finalMatchupCol}`),sheet.getRange(`R${spreadRow}C${firstMatchupCol}:R${bonusRow}C${finalMatchupCol}`)])
+    .build();
+  formatRules.push(formatRuleWeightedTwo);
+  
+  // Format rules for difference columns to emphasize the most common picker
+  if (layout.diffCol > 0) {
+    let commonPickersGradient = hexGradient('#46f081','#e4f0e8',8);
+    const commonPickersFormula = `=value(regexextract(indirect("R[0]C[0]",false),"[0-9]+"))=`;
+    range = sheet.getRange(layout.entryRowStart,layout.diffCol,layout.totalMembers+1,layout.diffCount);
+    for (let a = 0; a < commonPickersGradient.length; a++) {
+      let rule = SpreadsheetApp.newConditionalFormatRule()
+        .whenFormulaSatisfied(`${commonPickersFormula}${a}`)
+        .setBackground(commonPickersGradient[a])
+        .setRanges([range])
+        .build();
+      formatRules.push(rule);
+    }
+  }
+
+  // TEAM COLORATION FOR OUTCOME ROW
+  const matchupOutcomeRange = sheet.getRange(layout.outcomeRow, layout.firstMatchupCol, 1, layout.matchups)
+  Object.keys(LEAGUE_DATA).forEach( team => {    
+    const teamData = LEAGUE_DATA[team];
+    Logger.log(teamData);
+    const color_bg = teamData.colors[0];
+    const color_txt = teamData.colors[1];
+    formatRules.push(
+      SpreadsheetApp.newConditionalFormatRule()
+        .whenFormulaSatisfied(`=indirect("R[0]C[0]",false)="${team}"`)
+        .setBackground(color_bg || '#b0b0b0')
+        .setFontColor(color_txt)
+        .setRanges([matchupOutcomeRange])
+        .build())
+  });
+
+  // Add conditional formatting rules to indicate paid status (added last to take lowest priority)
+  if (layout.paidCheckboxes) {
+    // Re-asserted, never inserted: insertCheckboxes() would set every paid cell back to false.
+    sheet.getRange(layout.entryRowStart,layout.paidCol,layout.totalMembers,1)
+      .setDataValidation(SpreadsheetApp.newDataValidation().requireCheckbox().build())
+      .setFontSize(11)
+      .setHorizontalAlignment('center');
+    let finalPaidCell = sheet.getRange(layout.entryRowEnd+1,layout.paidCol);
+    finalPaidCell.setHorizontalAlignment('center')
+      .setWrapStrategy(SpreadsheetApp.WrapStrategy.WRAP)
+      .setFontWeight('bold')
+      .setNumberFormat("##.#%");
+    let formatRuleAllPaid = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo('ALL PAID')
+      .setBackground('#b5fff2')
+      .setRanges([finalPaidCell])
+      .build();
+    formatRules.push(formatRuleAllPaid);
+    let formatRuleAllNotPaid = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo('UNPAID')
+      .setBackground('#ffd5b5')
+      .setRanges([finalPaidCell])
+      .build();
+    formatRules.push(formatRuleAllNotPaid);
+    let formatRulePartialPaid = SpreadsheetApp.newConditionalFormatRule()
+      .setGradientMaxpointWithValue("#b5fff2", SpreadsheetApp.InterpolationType.NUMBER, ".99")
+      .setGradientMidpointWithValue("#FFFFFF", SpreadsheetApp.InterpolationType.NUMBER, ".50")
+      .setGradientMinpointWithValue("#ffd5b5", SpreadsheetApp.InterpolationType.NUMBER, ".01")
+      .setRanges([finalPaidCell])
+      .build();
+    formatRules.push(formatRulePartialPaid);
+    sheet.setColumnWidth(layout.paidCol,70);
+    const nameBlockRange = sheet.getRange(layout.entryRowStart,1,layout.totalMembers,layout.firstMatchupCol-1);
+    const paidColRange = sheet.getRange(layout.entryRowStart,layout.paidCol,layout.totalMembers,1);
+    let formatRulePaid = SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=indirect("R[0]C${layout.paidCol}",false)=true`)
+      .setBackground('#f0fffc')
+      .setRanges([nameBlockRange,paidColRange])
+      .build();      
+    formatRules.push(formatRulePaid);
+    let formatRuleUnpaid = SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=indirect("R[0]C${layout.paidCol}",false)=false`)
+      .setBackground('#fff3eb')
+      .setItalic(true)
+      .setRanges([nameBlockRange,paidColRange])
+      .build();
+    formatRules.push(formatRuleUnpaid);
+  }
+
+  // Sets all formerly pushed rules to the sheet
+  sheet.setConditionalFormatRules(formatRules);
+
+  // Setting size, alignment, frozen columns
+  sheet.getRange(1,1,layout.rows,layout.finalCol)
+    .setVerticalAlignment('middle')
+    .setHorizontalAlignment('center')
+    .setFontSize(10)
+    .setFontFamily("Montserrat");
+  sheet.getRange(layout.subHeaderRow,2,1,subHeadersPriorLength - 1)
+    .setFontSize(8)
+    .setFontWeight('bold');
+  const chancesMergeRange = sheet.getRange(layout.subHeaderRow,layout.chancesCol,1,2);
+  chancesMergeRange.breakApart();
+  chancesMergeRange.mergeAcross();
+
+  if (layout.diffCol > 0) {
+    sheet.getRange(layout.entryRowStart,layout.diffCol,layout.totalMembers+1,layout.diffCount).setHorizontalAlignment('left');
+  }
+  if (layout.commentsInclude) {
+    sheet.getRange(2,layout.commentCol,layout.totalMembers+1,1).setHorizontalAlignment('left');
+  }
+
+  sheet.getRange(1,1,layout.summaryRow,1)
+    .setHorizontalAlignment('left');
+ 
+  sheet.setFrozenColumns(layout.firstMatchupCol-1);
+  sheet.setFrozenRows(layout.subHeaderRow);
+  sheet.getRange(1,1,1,layout.finalCol)
+    .setBackground('black')
+    .setFontColor('white')
+    .setFontWeight('bold');
+  sheet.setRowHeights(1,layout.rows,21);
+
+  sheet.getRange(layout.matchupRow,1,1,layout.finalCol).setVerticalAlignment('middle');
+  sheet.setRowHeight(layout.matchupRow,50);
+  sheet.getRange(layout.matchupRow,1).setHorizontalAlignment('center');
+  
+  sheet.getRange(layout.subHeaderRow,layout.firstMatchupCol,1,layout.matchups).setFontSize(7);
+  sheet.getRange(layout.subHeaderRow,1,1,layout.finalCol).setBackground('#CCCCCC');
+  sheet.getRange(layout.subHeaderRow,layout.firstMatchupCol,1,layout.matchupDescriptors.length).setBackgrounds([layout.matchupDescriptors.map(d => d.dayHeader)]);
+  sheet.getRange(layout.subHeaderRow,1).setHorizontalAlignment('left');
+  
+  // Lower area black background, white text, and font size 10
+  sheet.getRange(layout.spreadRow,1,layout.bonusRow-layout.spreadRow+1,layout.finalCol)
+    .setHorizontalAlignment('center')
+    .setBackground('black')
+    .setFontColor('white')
+    .setFontSize(10);
+  // Spread row to bonus row formatting
+  const spreadToBonusLabelRange = sheet.getRange(layout.spreadRow,1,layout.bonusRow-layout.spreadRow+1,layout.firstMatchupCol-1);
+  spreadToBonusLabelRange.breakApart();
+  spreadToBonusLabelRange.mergeAcross().setHorizontalAlignment('right');
+  // Smaller spread values to fit widths
+  sheet.getRange(layout.spreadRow,1,1,layout.finalCol).setFontSize(8);
+  // Bold on these 
+  sheet.getRange(layout.outcomeRow,1,1,layout.finalCol).setFontWeight('bold');   
+  sheet.getRange(layout.spreadOutcomeRow,1,1,layout.finalCol).setFontWeight('bold');
+
+  if (!layout.config.bonusInclude) {
+    sheet.hideRows(layout.bonusRow);
+  }
+
+  if (!layout.isAts) {
+    sheet.hideRows(layout.spreadRow);
+    sheet.hideRows(layout.outcomeMarginRow);
+    sheet.hideRows(layout.spreadOutcomeRow);
+  }
+
+  sheet.setRowHeight(layout.summaryRow,40);
+  sheet.getRange(layout.summaryRow,1,1,layout.finalCol).setVerticalAlignment('middle');
+  sheet.getRange(layout.summaryRow,1,1,layout.finalCol-layout.diffCount).setBackground('#CCCCCC');
+  sheet.getRange(layout.summaryRow,5).setBackground(awayColors[1]);
+  sheet.getRange(layout.summaryRow,6).setBackground(homeColors[1]);
+
+  // GROUP AVG POINTS/PICKS
+  sheet.getRange(layout.summaryRow,2).setFontSize(8).setBackground('#75F0A1');
+  // GROUP LEADER/TIE
+  sheet.getRange(layout.summaryRow,3).setFontSize(8).setBackground('#5EDCFF');
+  
+  // MERGE Different picker columns
+  if (layout.diffCol > 0) {
+    const diffHeaderRange = sheet.getRange(1,layout.diffCol,2,layout.diffCount);
+    diffHeaderRange.breakApart();
+    diffHeaderRange.setHorizontalAlignment('left').mergeAcross();
+  }
+
+  let lastWidthsValue, lastHeaderFontValue, lastSubHeaderFontValue;
+  let widthsHeldCount = 0, headerHeldCount = 0, subHeaderHeldCount = 0;
+  let widthsStartCol = 1, headerStartCol = 1, subHeaderStartCol = 1;
+
+  // Set all cell/column specific sizes and formats
+  for (let a = 0; a <= layout.widths.length; a++) {
+    // Handle Column Widths
+    if (a === 0) {
+      // First iteration - initialize
+      lastWidthsValue = layout.widths[a];
+      widthsHeldCount = 1;
+      widthsStartCol = 1;
+    } else if (a === layout.widths.length || lastWidthsValue !== layout.widths[a]) {
+      // Apply the batch when value changes or at end
+      sheet.setColumnWidths(widthsStartCol, widthsHeldCount, lastWidthsValue);
+      if (a < layout.widths.length) {
+        // Start new batch
+        lastWidthsValue = layout.widths[a];
+        widthsHeldCount = 1;
+        widthsStartCol = a + 1;
+      }
+    } else {
+      // Same value, continue batch
+      widthsHeldCount++;
+    }
+    
+    // Handle Header Font Sizes (Row 1)
+    if (a === 0) {
+      // First iteration - initialize
+      lastHeaderFontValue = layout.fontSizes[a];
+      headerHeldCount = 1;
+      headerStartCol = 1;
+    } else if (a === layout.fontSizes.length || lastHeaderFontValue !== layout.fontSizes[a]) {
+      // Apply the batch when value changes or at end
+      sheet.getRange(1, headerStartCol, 1, headerHeldCount).setFontSize(lastHeaderFontValue);
+      if (a < layout.fontSizes.length) {
+        // Start new batch
+        lastHeaderFontValue = layout.fontSizes[a];
+        headerHeldCount = 1;
+        headerStartCol = a + 1;
+      }
+    } else {
+      // Same value, continue batch
+      headerHeldCount++;
+    }
+    
+    // Handle SubHeader Font Sizes (Row 2)
+    if (a === 0) {
+      // First iteration - initialize
+      lastSubHeaderFontValue = layout.subFontSizes[a];
+      subHeaderHeldCount = 1;
+      subHeaderStartCol = 1;
+    } else if (a === layout.subFontSizes.length || lastSubHeaderFontValue !== layout.subFontSizes[a]) {
+      // Apply the batch when value changes or at end
+      sheet.getRange(2, subHeaderStartCol, 1, subHeaderHeldCount).setFontSize(lastSubHeaderFontValue);
+      
+      if (a < layout.subFontSizes.length) {
+        // Start new batch
+        lastSubHeaderFontValue = layout.subFontSizes[a];
+        subHeaderHeldCount = 1;
+        subHeaderStartCol = a + 1;
+      }
+    } else {
+      // Same value, continue batch
+      subHeaderHeldCount++;
+    }
+  }
+}
+
 // WEEKLY Sheet Function - creates a sheet with provided week, members [array], and if data should be restored
 function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   ss = ss || fetchSpreadsheet(ss);
