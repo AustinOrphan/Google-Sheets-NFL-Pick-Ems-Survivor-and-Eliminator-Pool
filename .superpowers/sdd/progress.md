@@ -188,3 +188,16 @@ Task 6: COMPLETE (commits 17f108e..c9f75dc, review APPROVED - no Critical)
   clearFormat rectangle carry-forward RESOLVED: adjustRows/adjustColumns resize to exactly the
   target and applyWeeklyFormatting has one caller, always right after writeWeeklyContent.
   Minor: ledger said 13 setNote, actual is 12.
+Task 7: COMPLETE (commits 38a55c7..30a6cb5, 2 fix passes, review APPROVED)
+  28 tests. Interlock honestly characterised: load-bearing checks are the INDEPENDENT sheet
+  reads (getMaxRows, getMaxColumns, header row, NAMES start row, NAMES parent sheet, blank-row
+  scan). Roster length+contents are tautologies from the live caller (layout.members derives
+  from namesValues) - kept for the pure comparator's contract only. sheetExists branch is dead
+  from the live caller. Plan corrected to say so.
+  Fix 1: NAMES_{week} is spreadsheet-scoped and can point at a DIFFERENT sheet after a rename
+    or duplication -> now guarded, logic placed in the pure comparator so it is testable.
+  Fix 2: blank-row-scan test was CONFOUNDED - reviewer mutation-tested by deleting the block
+    and the test still passed (the inert roster loop caught it instead). Since the roster loop
+    cannot fire live, the blank-row scan is the SOLE live defense. Test rewritten to mirror the
+    real derivation; isolation proven by re-deleting the block and watching it fail.
+  Also: 3 reason codes gained the remedy text the other 5 had; 1 no-op duplicate test removed.
