@@ -11175,6 +11175,102 @@ function reformatWeeklySheet(week, ss, config, forms, memberData) {
            detail: `Week ${week} formatting reapplied.` };
 }
 
+// REFORMAT PANEL DATA - One row per candidate week, carrying the same verify result the reformat
+// itself will use. There is deliberately no second opinion about readiness here: this calls
+// verifyWeeklyLayout, exactly what reformatWeeklySheet calls, so the panel can never offer a week
+// the reformat would then refuse.
+//
+// Candidates are the UNION of weeks with form data and weeks with a WK sheet, not the
+// intersection. The intersection would make 'no-sheet' and 'no-form-data' structurally
+// unreachable, and those are two of the states the panel exists to surface.
+function getReformatPanelData() {
+  const ss = fetchSpreadsheet();
+  // Read once and threaded through every verify call below. verifyWeeklyLayout reads
+  // config.hideNonParticipants with no fallback of its own, and re-reading per week would cost
+  // roughly 18 redundant PropertiesService round trips for a full season.
+  const docProps = PropertiesService.getDocumentProperties();
+  const config = JSON.parse(docProps.getProperty('configuration')) || {};
+  const forms = JSON.parse(docProps.getProperty('forms')) || {};
+  const memberData = JSON.parse(docProps.getProperty('members')) || {};
+
+  // Number('') and Number(' ') are both 0, so a stray blank key would otherwise become a bogus
+  // "WK 0" row; require a positive integer rather than merely not-NaN.
+  const isWeek = (n) => Number.isInteger(n) && n > 0;
+  const candidates = new Set(Object.keys(forms).map(Number).filter(isWeek));
+  // ONE getSheets() call for discovery, not one getSheetByName() per week - this function already
+  // pays for a verify pass across every candidate and has to stay inside the 6-minute limit.
+  const weeklySheetName = new RegExp(`^${weeklySheetPrefix}(\\d+)$`);
+  ss.getSheets().forEach(sheet => {
+    const match = weeklySheetName.exec(sheet.getName());
+    if (match && isWeek(Number(match[1]))) candidates.add(Number(match[1]));
+  });
+
+  const weeks = Array.from(candidates).sort((a, b) => a - b).map(week => {
+    // verifyWeeklyLayout is contracted never to throw. One bad week must not cost the user the
+    // whole panel, so the contract is belt-and-braced here rather than assumed.
+    try {
+      const v = verifyWeeklyLayout(week, config, forms, memberData, ss);
+      return { week: week, reason: v.reason, detail: v.detail, ready: v.ok };
+    } catch (err) {
+      Logger.log(`⛔ Week ${week} could not be checked for the reformat panel: ${err.message}`);
+      return { week: week, reason: 'error', ready: false,
+               detail: `Week ${week} could not be checked: ${err.message}. ` +
+                       `Check the Apps Script execution log for details.` };
+    }
+  });
+
+  return { weeks: weeks };
+}
+
+// REFORMAT SUBMISSION - Reformats the selected weeks and returns a per-week report.
+// Every week is re-verified inside reformatWeeklySheet, so a panel left open while the
+// spreadsheet changed underneath it cannot push a write onto a week that stopped being ready.
+function processReformatSubmission(weeks) {
+  const ss = fetchSpreadsheet();
+  const docProps = PropertiesService.getDocumentProperties();
+  const config = JSON.parse(docProps.getProperty('configuration')) || {};
+  const forms = JSON.parse(docProps.getProperty('forms')) || {};
+  const memberData = JSON.parse(docProps.getProperty('members')) || {};
+
+  const list = (Array.isArray(weeks) ? weeks : [])
+    .map(Number)
+    .filter(n => Number.isInteger(n) && n > 0)
+    .sort((a, b) => a - b);
+
+  // config, forms and memberData are passed explicitly so reformatWeeklySheet never re-reads the
+  // document properties, and so every week in one run is judged against the same snapshot.
+  const results = list.map(week => reformatWeeklySheet(week, ss, config, forms, memberData));
+
+  // Tab colour is spreadsheet-scoped, not sheet-scoped: weeklySheetTabColors repaints every WK
+  // tab from the newest week down to 1, so it runs ONCE after the loop, never once per week.
+  const done = results.filter(r => r.ok).map(r => r.week);
+  if (done.length) weeklySheetTabColors(ss, Math.max.apply(null, done), true);
+
+  const okCount = done.length;
+  const failed = results.filter(r => !r.ok);
+  const message = failed.length === 0
+    ? `Reformatted ${okCount} week${okCount === 1 ? '' : 's'}.`
+    : `Reformatted ${okCount}; skipped ${failed.length} ` +
+      `(${failed.map(f => weeklySheetPrefix + f.week).join(', ')}).`;
+
+  Logger.log(`🎨 ${message}`);
+  ss.toast(message, `🎨 REAPPLY FORMATTING`);
+  return { results: results, message: message };
+}
+
+/**
+ * Creates and displays the HTML modal dialog for reapplying weekly formatting.
+ * 480x620 sits between renamePanel (400x280, a two-field form) and survElimPanel (600x700, a
+ * full grid): wide enough for a status plus a wrapped remedy line, tall enough for ~14 weeks.
+ */
+function launchReformatPanel() {
+  const html = HtmlService.createHtmlOutputFromFile('reformatPanel')
+      .setWidth(480)
+      .setHeight(620);
+  SpreadsheetApp.flush();
+  SpreadsheetApp.getUi().showModalDialog(html, 'Reapply Formatting');
+}
+
 // WEEKLY Sheet Function - creates a sheet with provided week, members [array], and if data should be restored
 function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   ss = ss || fetchSpreadsheet(ss);

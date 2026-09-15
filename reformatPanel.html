@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body { font-family: 'Montserrat', Arial, sans-serif; padding: 0; margin: 0; background-color: #FFFFFF; }
+    .container { padding: 20px; }
+    h3 { margin: 0 0 4px 0; color: #333; font-size: 16px; }
+    .sub { color: #666; font-size: 12px; margin-bottom: 14px; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
+    .toolbar button { background: none; border: 1px solid #dadce0; border-radius: 4px;
+                      padding: 4px 10px; font-size: 12px; cursor: pointer; font-family: inherit; }
+    .toolbar button:hover { border-color: #013369; color: #013369; }
+    .list { border: 1px solid #E8EAED; border-radius: 6px; max-height: 340px; overflow-y: auto; }
+    .row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px; border-bottom: 1px solid #F1F3F4; }
+    .row:last-child { border-bottom: none; }
+    .row.disabled { background: #FAFAFA; color: #9AA0A6; }
+    .row input { margin-top: 2px; }
+    .empty { padding: 18px 12px; font-size: 13px; color: #9AA0A6; text-align: center; }
+    .wk { font-weight: 600; min-width: 52px; }
+    .status { flex: 1; font-size: 13px; }
+    .reason { font-size: 11px; color: #9AA0A6; margin-top: 2px; line-height: 1.35; }
+    .count { margin: 12px 0 0 0; font-size: 12px; color: #666; }
+    .button-section { padding: 16px 20px; background-color: #f8f9fa; border-top: 1px solid #E8EAED; }
+    .button-row { display: flex; gap: 8px; }
+    .btn { flex: 1; padding: 9px 14px; border: none; border-radius: 5px; cursor: pointer;
+           font-size: 15px; font-weight: 600; font-family: inherit; }
+    .btn-primary { background-color: #013369; color: white; }
+    .btn-primary:hover { background-color: #2067b3; }
+    .btn-primary:disabled { background-color: #B0B0B0; cursor: not-allowed; }
+    .btn-secondary { background-color: #B0B0B0; color: white; }
+    .btn-secondary:hover { background-color: #888; }
+    #loading, #processing { text-align: center; padding: 40px 20px; color: #666; }
+    #results { margin-top: 10px; }
+    .result { font-size: 13px; padding: 4px 0; }
+  </style>
+</head>
+<body>
+
+  <div id="loading">Checking weeks…</div>
+
+  <div id="main" style="display:none;">
+    <div class="container">
+      <h3>🎨 Reapply Formatting</h3>
+      <div class="sub">Repairs generated formatting. Picks, tiebreakers, comments and paid status are never changed.</div>
+      <div class="toolbar">
+        <button type="button" onclick="selectAll(true)">Select all</button>
+        <button type="button" onclick="selectAll(false)">Clear</button>
+      </div>
+      <div class="list" id="list"></div>
+      <p class="count" id="count"></p>
+    </div>
+    <div class="button-section">
+      <div class="button-row">
+        <button type="button" class="btn btn-secondary" onclick="google.script.host.close()">Cancel</button>
+        <button type="button" class="btn btn-primary" id="submit" onclick="submitSelection()">Reapply Formatting</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="processing" style="display:none;">Reapplying formatting…<br><br>This can take a minute.</div>
+
+  <div id="done" style="display:none;">
+    <div class="container">
+      <h3>Done</h3>
+      <div id="results"></div>
+    </div>
+    <div class="button-section">
+      <div class="button-row">
+        <button type="button" class="btn btn-primary" onclick="google.script.host.close()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Every reason code verifyWeeklyLayout / compareWeeklyLayout can return. A code with no entry
+    // here would show the user the raw code, so all eight are listed even though 'ready' is the
+    // only one the checklist shows on an enabled row.
+    var LABEL = {
+      'ready':          '✅ ready',
+      'drift':          '⚠️ schedule drift',
+      'no-form-data':   '🚫 no form data',
+      'no-sheet':       '🚫 no sheet',
+      'row-mismatch':   '⚠️ row count mismatch',
+      'col-mismatch':   '⚠️ column count mismatch',
+      'names-mismatch': '⚠️ member list mismatch',
+      'error':          '⚠️ could not check'
+    };
+
+    function label(reason) { return LABEL[reason] || ('⚠️ ' + reason); }
+
+    function errorText(error) {
+      if (!error) return 'Unknown error.';
+      return error.message || String(error);
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+      google.script.run
+        .withSuccessHandler(render)
+        .withFailureHandler(fail)
+        .getReformatPanelData();
+    });
+
+    function render(data) {
+      var weeks = (data && data.weeks) || [];
+      var list = document.getElementById('list');
+      list.innerHTML = '';
+
+      if (!weeks.length) {
+        var empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = 'No weekly sheets or form data found yet. Run Check & Import Responses first.';
+        list.appendChild(empty);
+      }
+
+      weeks.forEach(function (w) {
+        var row = document.createElement('div');
+        row.className = 'row' + (w.ready ? '' : ' disabled');
+
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.value = w.week;
+        cb.checked = w.ready;
+        cb.disabled = !w.ready;
+        cb.className = 'wkbox';
+        cb.onchange = updateCount;
+
+        var wk = document.createElement('div');
+        wk.className = 'wk';
+        wk.textContent = 'WK ' + w.week;
+
+        var st = document.createElement('div');
+        st.className = 'status';
+        st.textContent = label(w.reason);
+        // The remedy line only matters when the week cannot be reformatted; on a ready week the
+        // detail is just "Week N is ready to reformat", which the label already says.
+        if (!w.ready && w.detail) {
+          var r = document.createElement('div');
+          r.className = 'reason';
+          r.textContent = w.detail;
+          st.appendChild(r);
+        }
+
+        row.appendChild(cb);
+        row.appendChild(wk);
+        row.appendChild(st);
+        list.appendChild(row);
+      });
+
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('main').style.display = 'block';
+      updateCount();
+    }
+
+    function boxes() {
+      return Array.prototype.slice.call(document.getElementsByClassName('wkbox'));
+    }
+
+    function selectAll(on) {
+      boxes().forEach(function (b) { if (!b.disabled) b.checked = on; });
+      updateCount();
+    }
+
+    function updateCount() {
+      var all = boxes();
+      var sel = all.filter(function (b) { return b.checked; });
+      document.getElementById('count').textContent =
+        sel.length + ' of ' + all.length + ' week' + (all.length === 1 ? '' : 's') + ' selected';
+      document.getElementById('submit').disabled = sel.length === 0;
+    }
+
+    // Named submitSelection(), not submit(): the primary button carries id="submit", and an
+    // inline handler resolves names through the element and document before reaching window.
+    // The global function declaration does win that lookup, but the collision is not worth the
+    // reader having to prove it.
+    function submitSelection() {
+      var weeks = boxes().filter(function (b) { return b.checked; })
+                         .map(function (b) { return Number(b.value); });
+      if (!weeks.length) return;
+      document.getElementById('main').style.display = 'none';
+      document.getElementById('processing').style.display = 'block';
+      google.script.run
+        .withSuccessHandler(finish)
+        .withFailureHandler(fail)
+        .processReformatSubmission(weeks);
+    }
+
+    function finish(report) {
+      var results = (report && report.results) || [];
+      var out = document.getElementById('results');
+      out.innerHTML = '';
+
+      var head = document.createElement('div');
+      head.className = 'result';
+      head.style.fontWeight = '600';
+      head.textContent = (report && report.message) || 'Finished.';
+      out.appendChild(head);
+
+      results.forEach(function (r) {
+        var d = document.createElement('div');
+        d.className = 'result';
+        d.textContent = 'WK ' + r.week + ' — ' + (r.ok ? '✅ reformatted' : label(r.reason));
+        // A week refused between opening the panel and submitting needs its reason here, not just
+        // in the checklist the user has already left behind.
+        if (!r.ok && r.detail) {
+          var why = document.createElement('div');
+          why.className = 'reason';
+          why.textContent = r.detail;
+          d.appendChild(why);
+        }
+        out.appendChild(d);
+      });
+
+      document.getElementById('processing').style.display = 'none';
+      document.getElementById('done').style.display = 'block';
+    }
+
+    function fail(error) {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('processing').style.display = 'none';
+      document.getElementById('main').style.display = 'none';
+      var out = document.getElementById('results');
+      out.innerHTML = '';
+      var d = document.createElement('div');
+      d.className = 'result';
+      d.textContent = 'Error: ' + errorText(error);
+      out.appendChild(d);
+      document.getElementById('done').style.display = 'block';
+    }
+  </script>
+</body>
+</html>
