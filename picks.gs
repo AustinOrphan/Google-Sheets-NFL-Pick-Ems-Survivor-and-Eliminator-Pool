@@ -9982,20 +9982,27 @@ function computeWeeklyLayout(week,config,forms,memberData,observed) {
   const wildcardCol = headers.length;
   notes.push({ row: matchupRow, col: wildcardCol, text: `Represents the percent alignment to the median set of picks for week ${week}` });
 
-  // Cohesion block, diffCount columns wide and merged across both header rows
-  headers.push('🤝 COHESION');
-  subHeaders.push('How many picks you differ from other members');
-  const diffCol = headers.length;
-  let finalCol = diffCol + (diffCount-1);
-  // diffCount is 0 for a single-member pool, so the fill counts are clamped to keep Array() legal
-  const diffPadCount = Math.max(0, diffCount - 1);
-  const diffSpanCount = Math.max(0, diffCount);
-  headers.push(...Array(diffPadCount).fill(''));
-  subHeaders.push(...Array(diffPadCount).fill(''));
-  widths.push(...Array(diffSpanCount).fill(90));
-  fontSizes.push(...Array(diffSpanCount).fill(10));
-  subFontSizes.push(...Array(diffSpanCount).fill(7));
-  notes.push({ row: matchupRow, col: diffCol, text: `Displayed as the number of picks deviated from the next closests pickers` });
+  // Cohesion block, diffCount columns wide and merged across both header rows.
+  // diffCount is 0 for a single-member pool (nobody to compare picks against), so the column
+  // is omitted entirely rather than emitting a degenerate zero-width block; diffCol mirrors
+  // tiebreakerCol's -1 convention for "this optional column does not exist".
+  let diffCol = -1;
+  let finalCol;
+  if (diffCount > 0) {
+    headers.push('🤝 COHESION');
+    subHeaders.push('How many picks you differ from other members');
+    diffCol = headers.length;
+    finalCol = diffCol + (diffCount - 1);
+    const diffPadCount = diffCount - 1;
+    headers.push(...Array(diffPadCount).fill(''));
+    subHeaders.push(...Array(diffPadCount).fill(''));
+    widths.push(...Array(diffCount).fill(90));
+    fontSizes.push(...Array(diffCount).fill(10));
+    subFontSizes.push(...Array(diffCount).fill(7));
+    notes.push({ row: matchupRow, col: diffCol, text: `Displayed as the number of picks deviated from the next closests pickers` });
+  } else {
+    finalCol = headers.length;
+  }
 
   // Weekly checkboxes for payment status, if configured
   const paidCheckboxes = config?.weeklyPaidTracking ? config.weeklyPaidTracking : false;
@@ -10041,6 +10048,15 @@ function computeWeeklyLayout(week,config,forms,memberData,observed) {
     // Formula: this cell's value = the text to the LEFT of the "@" in the matchup row.
     away: `AND(ISBLANK(${outcomeRowRef}), NOT(ISBLANK(${thisCellRef})), ${thisCellRef}=TRIM(LEFT(${matchupRef}, FIND("@",${matchupRef})-1)))`
   };
+
+  // Fixed-column header notes. weeklySheet still applies these itself via setNote (unchanged
+  // here); they are collected into `notes` too so a later reformat pass can carry them without
+  // re-deriving the text. chancesCol intentionally reads config.pickemsAts, not layout.isAts
+  // (forms[week].gamePlan.pickemsAts) — see task report for the discrepancy this can produce.
+  notes.push({ row: matchupRow, col: pointsCol, text: config.bonusInclude ? `The number of correct points using bonus multipliers` : `The current amount of correct picks on the week` });
+  notes.push({ row: matchupRow, col: rankCol, text: `Current weekly rank of each member` });
+  notes.push({ row: matchupRow, col: percentCol, text: config.bonusInclude ? `Percent of picks correct (disregards bonus multipliers)` : `Percent of picks correct` });
+  notes.push({ row: matchupRow, col: chancesCol, text: config.pickemsAts ? `Chance to finish with the most ${config.bonusInclude ? 'points':'correct picks'} on the week, accounts for spread probabilities${config.tiebreakerInclude ? ' but does not consider tiebreakers ' : ''}` : `Chance to finish with the most ${config.bonusInclude ? 'points':'correct picks'} on the week` });
 
   return {
     week, config, isAts, diffCount,

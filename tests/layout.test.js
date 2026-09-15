@@ -154,4 +154,57 @@ describe('computeWeeklyLayout', () => {
     assert.deepEqual(a.headers, b.headers);
     assert.deepEqual(a.matchupDescriptors.map(d => d.col), b.matchupDescriptors.map(d => d.col));
   });
+
+  it('finalCol / headers / widths / subHeaders / fontSizes / subFontSizes stay in lockstep for every member count', () => {
+    for (const n of [1, 2, 3, 8, 25, 60]) {
+      const l = build({ memberCount: n });
+      assert.equal(l.finalCol, l.headers.length, 'n=' + n + ' finalCol vs headers.length');
+      assert.equal(l.headers.length, l.widths.length, 'n=' + n + ' headers.length vs widths.length');
+      assert.equal(l.headers.length, l.subHeaders.length, 'n=' + n + ' headers.length vs subHeaders.length');
+      assert.equal(l.headers.length, l.fontSizes.length, 'n=' + n + ' headers.length vs fontSizes.length');
+      assert.equal(l.headers.length, l.subFontSizes.length, 'n=' + n + ' headers.length vs subFontSizes.length');
+    }
+  });
+
+  it('a single-member layout has no cohesion column; a multi-member layout does', () => {
+    const single = build({ memberCount: 1 });
+    assert.equal(single.diffCol, -1, 'single-member diffCol should use the absent-column sentinel, like tiebreakerCol');
+
+    const multi = build({ memberCount: 8 });
+    assert.ok(multi.diffCol > 0, 'multi-member diffCol should point at a real column');
+  });
+
+  it('layout.notes carries the pointsCol/rankCol/percentCol/chancesCol header notes', () => {
+    // pickemsAts pinned to false so chancesCol's config.pickemsAts branch is unambiguous here;
+    // the config.pickemsAts vs. forms[week].gamePlan.pickemsAts (layout.isAts) split is a
+    // separate, pre-existing question — see the task report.
+    const withBonus = build({ config: { bonusInclude: true, pickemsAts: false } });
+    const withoutBonus = build({ config: { bonusInclude: false, pickemsAts: false } });
+
+    const findNote = (l, col) => l.notes.find(n => n.row === l.matchupRow && n.col === col);
+
+    const pointsWith = findNote(withBonus, withBonus.pointsCol);
+    const pointsWithout = findNote(withoutBonus, withoutBonus.pointsCol);
+    assert.ok(pointsWith, 'missing pointsCol note (bonusInclude=true)');
+    assert.ok(pointsWithout, 'missing pointsCol note (bonusInclude=false)');
+    assert.equal(pointsWith.text, 'The number of correct points using bonus multipliers');
+    assert.equal(pointsWithout.text, 'The current amount of correct picks on the week');
+    assert.notEqual(pointsWith.text, pointsWithout.text);
+
+    const rankNote = findNote(withBonus, withBonus.rankCol);
+    assert.ok(rankNote, 'missing rankCol note');
+    assert.equal(rankNote.text, 'Current weekly rank of each member');
+
+    const percentWith = findNote(withBonus, withBonus.percentCol);
+    const percentWithout = findNote(withoutBonus, withoutBonus.percentCol);
+    assert.ok(percentWith, 'missing percentCol note (bonusInclude=true)');
+    assert.ok(percentWithout, 'missing percentCol note (bonusInclude=false)');
+    assert.equal(percentWith.text, 'Percent of picks correct (disregards bonus multipliers)');
+    assert.equal(percentWithout.text, 'Percent of picks correct');
+    assert.notEqual(percentWith.text, percentWithout.text);
+
+    const chancesWith = findNote(withBonus, withBonus.chancesCol);
+    assert.ok(chancesWith, 'missing chancesCol note');
+    assert.equal(chancesWith.text, 'Chance to finish with the most points on the week');
+  });
 });
