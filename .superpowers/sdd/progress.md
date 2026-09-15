@@ -43,3 +43,20 @@ Task 1: COMPLETE (commits 28513dd..e1e0a85, 2 fix passes)
   bare-word traversal causes noise once applyWeeklyFormatting actually exists (Task 5).
   Note: .superpowers/sdd/.gitignore is `*`, so only progress.md is force-tracked;
   task-N-report.md files are local scratch and will not survive a clean checkout.
+
+Task 2: implemented (8c38376) + fix pass (17949ef). Review: spec OK, fidelity CLEAN
+  (14336 differential cases vs original geometry, 0 divergences; 2048 refThrows were
+  exactly the n=1 RangeError the fix addresses).
+  2 Important -> gate fix pass in flight:
+    I-1 purity test is fake (harness Proxy swallows writes; reviewer injected setValue
+        and suite still reported 15 passed). Purity unenforced by anything.
+    I-2 a COMMENT at picks.gs:10052 naming weeklySheet drags all 1033 of its lines into
+        the gate's bare-word callee scan -> would turn Task 5 red with false positives.
+        Direct fallout from my fix-pass-2 over-approximation decision.
+  Minor deferred to final review: displayEmpty:false branch untested; isAts always true
+  in fixtures so baseFormulas ATS switch never exercised; several tautological assertions
+  (rows===bonusRow, d.key vs own fields, newMatchupMap value never checked); day-colour
+  fallbacks untested; mixed -1/undefined sentinels (now a plan constraint); contests is a
+  live alias not a copy.
+  Follow-up for Task 13: chancesCol note reads config.pickemsAts while layout.isAts reads
+  gamePlan.pickemsAts - two sources, can disagree. Ported verbatim, not reconciled.

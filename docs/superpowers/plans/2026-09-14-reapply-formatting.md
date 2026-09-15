@@ -23,6 +23,8 @@
 - **Apps Script cannot run locally.** Only the pure layer is unit-testable. Every step that touches `SpreadsheetApp` is verified manually in a *copy* of the spreadsheet, never the live pool.
 - **Never test against the live pool.** Make a copy via File → Make a copy before any manual step.
 - **Exact layout property names** are fixed in Task 2 and consumed verbatim by every later task.
+- **Absent columns use two different sentinels.** `tiebreakerCol` and `diffCol` are `-1` when absent; `mnfCol`, `commentCol` and `paidCol` are `undefined`. This is faithful to the original code. Consumers must handle both, and must never `JSON.stringify` the layout — the `undefined` keys vanish in a round-trip.
+- **Never pass an empty `observed.memberNames` array.** The guard is `Array.isArray`, not a non-emptiness check, so `[]` is treated as authoritative and yields a degenerate layout (`totalMembers` 0, `entryRowEnd` < `entryRowStart`). The reformat path must treat an empty scrape as a verify failure, not feed it to `computeWeeklyLayout`.
 
 ### Reason codes (fixed)
 
