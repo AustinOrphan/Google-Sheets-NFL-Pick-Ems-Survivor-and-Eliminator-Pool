@@ -241,3 +241,25 @@ Task 11: COMPLETE (commits 56f7ec8..61067ee, 1 test addition + 1 fix pass, revie
   concern); Deploy/Refresh still does.
   Follow-up: TOTAL writes 'AVERAGES' to A2 which member names overwrite -> averages row
   unlabelled. Pre-existing, one-word fix, out of scope.
+Task 12: COMPLETE (commit e85a035) - NOT a refactor; fixes live data loss.
+  Gap confirmed against HEAD: awk over both function bodies (11424-11587 pre-change, brief's
+  10925-11091 was stale) | grep -ci paid == 0. insertCheckboxes() sets every paid cell false
+  on every member-expansion rebuild, and nothing scraped or restored it.
+  3 edits: writeWeeklyContent now sets PAID_{week} named range (did not exist anywhere before)
+  inside the EXISTING layout.paidCheckboxes guard, reusing the range insertCheckboxes() gets;
+  getExistingWeeklySheetData scrapes it defensively (tiebreaker/comments pattern + Logger
+  disclosure) into playerData[name].paid; remapAndRepopulateData restores by NAME via
+  newMemberMap, writing only true.
+  Brief's Step 4 sketch was wrong for the real code: it derives a paidCol and indexes by
+  newRowIndex, but remapAndRepopulateData derives NO column positions - it addresses everything
+  through named ranges and resolves position via newMemberMap. Followed the real pattern.
+  Extra guard beyond brief: skip any target cell not reading exactly false. Covers a roster
+  longer than the range, and a stale PAID_{week} left behind if weeklyPaidTracking is switched
+  off, which would otherwise write TRUE into whatever cell now sits there.
+  NO test added, deliberate: logic is 3 SpreadsheetApp calls, harness stubs them, such a test
+  would pass with the fix reverted (would be the 4th nothing-asserting test this session).
+  node --check ok, npm test 34/34 (unchanged), gate clean (3 entry points).
+  PENDING manual BOTH halves - before (confirm 3 ticks vanish today) and after. CAVEAT the
+  user needs: the FIRST rebuild after deploying is still lossy on each week sheet, since
+  PAID_{week} does not exist until writeWeeklyContent creates it. Unrecoverable by design -
+  guessing the old paid column from the new layout risks paying the wrong people.
