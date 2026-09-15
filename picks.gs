@@ -10759,7 +10759,6 @@ function applyWeeklyFormatting(sheet,layout) {
   const matchupOutcomeRange = sheet.getRange(layout.outcomeRow, layout.firstMatchupCol, 1, layout.matchups)
   Object.keys(LEAGUE_DATA).forEach( team => {    
     const teamData = LEAGUE_DATA[team];
-    Logger.log(teamData);
     const color_bg = teamData.colors[0];
     const color_txt = teamData.colors[1];
     formatRules.push(
