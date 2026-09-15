@@ -9800,6 +9800,20 @@ function allFormulasUpdate(ss){
 
     sheet = ss.getSheetByName('WINNERS');
     winnersFormulas(weeks,sheet);
+
+    // Weekly paid-summary formulas, one per existing WK sheet
+    if (config.weeklyPaidTracking) {
+      const formsData = JSON.parse(docProps.getProperty('forms') || '{}');
+      for (const wk of Object.keys(formsData).map(Number).sort((a, b) => a - b)) {
+        const wkSheet = ss.getSheetByName(`${weeklySheetPrefix}${wk}`);
+        if (!wkSheet) continue;
+        const layout = computeWeeklyLayout(wk, config, formsData, memberData,
+          { displayEmpty: !config.hideNonParticipants, memberNames: null });
+        if (!layout || !layout.paidCheckboxes) continue;
+        wkSheet.getRange(layout.entryRowEnd + 1, layout.paidCol)
+               .setFormulaR1C1(layout.paid.summaryFormula);
+      }
+    }
   }
 }
 
@@ -10075,6 +10089,323 @@ function computeWeeklyLayout(week,config,forms,memberData,observed) {
     notes, outcomeValidations, paid,
     parities, baseFormulas
   };
+}
+
+// WEEKLY CONTENT — every write that puts data on a weekly sheet.
+// Owns the pre-rebuild scrape, the nuke/insert of the sheet itself, grid sizing, member names,
+// header and sub-header rows, spread and bonus values, named ranges, every formula, the paid
+// checkboxes, and the restore of any preserved data. Formatting is deliberately absent — that
+// belongs to applyWeeklyFormatting, which runs after this.
+// `sheet` may be null: the sheet is inserted here when it does not exist yet, which is why the
+// caller gets it back on the returned object.
+function writeWeeklyContent(sheet,layout,ss,rebuild) {
+
+  const sheetName = weeklySheetPrefix + layout.week;
+  let existingData = null;
+  const newMatchupMap = layout.newMatchupMap;
+  let range;
+
+  // 1. (IF EXISTS) SCRAPE DATA: Perform a best-effort scrape of the existing sheet.
+  if (sheet && rebuild) {
+    Logger.log(`"${sheetName}" sheet exists. Attempting to preserve data before rebuild...`);
+    ss.toast(`Attempting to gather and preserve any data that exists.`,`🔍 LOOKING FOR EXISTING DATA`)
+    // getExistingWeeklySheetData reaches into the forms object for forms[week].gamePlan.games and
+    // nothing else, and layout.contests is that same array, so the layout stands in for it here.
+    existingData = getExistingWeeklySheetData(ss, layout.week, { [layout.week]: { gamePlan: { games: layout.contests } } }); // Use the new robust function
+    if (existingData) {
+      Logger.log(`💾 Data preservation successful. Scraped ${Object.keys(existingData.playerData).length} players.`);
+      ss.toast(`Preserving existing data for week ${layout.week}...`,`💾 SAVED EXISTING DATA`);
+    } else {
+      Logger.log(`🚫 Could not find valid data to preserve in sheet. It will be completely reset.`);
+      ss.toast(`Could not find valid data to preserve in sheet. It will be completely reset.`,`🚫 NO OLD DATA FOUND`);
+    }
+  }
+
+  // 2. NUKE & PAVE: Always start with a clean sheet.
+  if (sheet) {
+    sheet.clear();
+    sheet.clearNotes();
+    sheet.clearConditionalFormatRules();
+    sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).clearDataValidations();
+    Logger.log(`🧼 Sheet "${sheetName}" has been cleaned for rebuild.`);
+    ss.toast(`Cleared out sheet for rebuilding and repopulating if possible`,`🧼 CLEANED ${weeklySheetPrefix}${layout.week} SHEET`)
+  } else {
+    sheet = ss.insertSheet(sheetName, ss.getNumSheets() + 1);
+    Logger.log(`⭐ Sheet "${sheetName}" created.`);
+    ss.toast(`Created the new weekly sheet for populating with form data.`,`⭐ NEW ${weeklySheetPrefix}${layout.week} SHEET`);
+  }
+
+  // 3. SIZE THE GRID: rows and columns together, before anything writes into it. A freshly
+  // inserted sheet only has 26 columns, and every getRange past maxColumns throws.
+  adjustRows(sheet,layout.rows);
+  adjustColumns(sheet,layout.finalCol);
+
+  sheet.getRange(layout.entryRowStart,1,layout.totalMembers,1).setValues(layout.members); 
+
+  let bottomHeaders = ['Group Stats'];
+
+  sheet.getRange(layout.summaryRow,1).setValue([bottomHeaders]);
+  sheet.getRange(layout.spreadRow,1).setValue('Spread Value');
+  sheet.getRange(layout.outcomeRow,1).setValue('Winner');
+  sheet.getRange(layout.outcomeMarginRow,1).setValue('Margin of Victory');
+  sheet.getRange(layout.spreadOutcomeRow,1).setValue('Winner Against the Spread');
+  sheet.getRange(layout.bonusRow,1).setValue('Bonus');
+
+  sheet.getRange(layout.matchupRow,1,1,layout.headers.length).setValues([layout.headers]);
+  sheet.getRange(layout.subHeaderRow,1,1,layout.subHeaders.length).setValues([layout.subHeaders]);
+
+  // Place spread values
+  sheet.getRange(layout.spreadRow,layout.firstMatchupCol,1,layout.spreads.length).setValues([layout.spreads])
+
+  // Set Bonus values
+  sheet.getRange(layout.bonusRow,layout.firstMatchupCol,1,layout.bonuses.length).setValues([layout.bonuses]);
+
+  // Begin building functions
+  // Create named ranges
+  ss.setNamedRange(`${LEAGUE}_${layout.week}`,sheet.getRange(layout.matchupRow,layout.firstMatchupCol,1,layout.matchups)); // Then shortname versions of the matchups ( do have \n within )
+  ss.setNamedRange(`${LEAGUE}_DAYS_${layout.week}`,sheet.getRange(layout.subHeaderRow,layout.firstMatchupCol,1,layout.matchups)); // Then shortname versions of the matchups ( do have \n within )
+  ss.setNamedRange(`${LEAGUE}_BIAS_${layout.week}`,sheet.getRange(layout.summaryRow,layout.firstMatchupCol,1,layout.matchups)); // Then shortname versions of the matchups ( do have \n within )
+  ss.setNamedRange(`${LEAGUE}_SPREADS_${layout.week}`,sheet.getRange(layout.spreadRow,layout.firstMatchupCol,1,layout.matchups)); // Spread values along bottom
+  ss.setNamedRange(`${LEAGUE}_PICKEM_OUTCOMES_${layout.week}`,sheet.getRange(layout.outcomeRow,layout.firstMatchupCol,1,layout.matchups)); // Outcomes of game (straight up)
+  ss.setNamedRange(`${LEAGUE}_PICKEM_OUTCOMES_${layout.week}_MARGIN`,sheet.getRange(layout.outcomeMarginRow,layout.firstMatchupCol,1,layout.matchups)); // Outcomes of game (straight up)
+  ss.setNamedRange(`${LEAGUE}_ATS_OUTCOMES_${layout.week}`,sheet.getRange(layout.spreadOutcomeRow,layout.firstMatchupCol,1,layout.matchups)); // Outcomes of game (straight up)
+  ss.setNamedRange(`${LEAGUE}_BONUS_${layout.week}`,sheet.getRange(layout.bonusRow,layout.firstMatchupCol,1,layout.matchups)); // Bonus multiplier for matchups
+  ss.setNamedRange(`${LEAGUE}_PICKS_${layout.week}`,sheet.getRange(layout.entryRowStart,layout.firstMatchupCol,layout.totalMembers,layout.matchups)); // All center data area (imported)
+
+  if (layout.tiebreakerInclude) {
+    ss.setNamedRange(`${LEAGUE}_TIEBREAKER_${layout.week}`,sheet.getRange(layout.entryRowStart,layout.tiebreakerCol,layout.totalMembers,1));
+    ss.setNamedRange(`${LEAGUE}_TIEBREAKER_${layout.week}_OUTCOME`,sheet.getRange(layout.outcomeRow,layout.tiebreakerCol)); // Tiebreaker Outcome
+    let validRule = SpreadsheetApp.newDataValidation()
+      .requireNumberBetween(0,150)
+      .setHelpText('Must be an integer between 0 and 120')
+      .build();
+    sheet.getRange(layout.outcomeRow,layout.tiebreakerCol).setDataValidation(validRule);
+  }
+  if (layout.commentsInclude) {
+    ss.setNamedRange(`COMMENTS_${layout.week}`,sheet.getRange(layout.entryRowStart,layout.commentCol,layout.totalMembers,1));
+  }
+
+  const effectiveOutcomeRow = layout.isAts ? layout.spreadOutcomeRow : layout.outcomeRow;
+
+  // These formulas are written for the FIRST row of the range (e.g., row 3).
+  // Using relative R1C1 notation (like R[0]) allows them to automatically adjust for all other rows.
+
+  // Define core range strings for reuse
+  const picksRange = `R[0]C${layout.firstMatchupCol}:R[0]C${layout.finalMatchupCol}`;
+  const allPicksRange = `R${layout.entryRowStart}C${layout.firstMatchupCol}:R${layout.entryRowEnd}C${layout.finalMatchupCol}`;
+  const allWinnersRange = `R${layout.entryRowStart}C${layout.winCol}:R${layout.entryRowEnd}C${layout.winCol}`;
+  const outcomesRange = `R${effectiveOutcomeRow}C${layout.firstMatchupCol}:R${effectiveOutcomeRow}C${layout.finalMatchupCol}`;
+  const pointsCell = `R[0]C${layout.pointsCol}`;
+  const rankCell = `R[0]C${layout.rankCol}`;
+  const chancesCell = `R[0]C${layout.chancesCol}`;
+  const allChancesRange = `R${layout.entryRowStart}C${layout.chancesCol}:R${layout.entryRowEnd}C${layout.chancesCol}`;
+  const allPointsRange = `R${layout.entryRowStart}C${layout.pointsCol}:R${layout.entryRowEnd}C${layout.pointsCol}`;
+  const allSpreadsRange = `R${layout.spreadRow}C${layout.firstMatchupCol}:R${layout.spreadRow}C${layout.finalMatchupCol}`;
+  const allBonusRange = `R${layout.bonusRow}C${layout.firstMatchupCol}:R${layout.bonusRow}C${layout.finalMatchupCol}`;
+
+  // Points Formula (using efficient SUMPRODUCT)
+  const pointsFormula = `=IFERROR(IF(COUNTA(${outcomesRange}) > 0, SUMPRODUCT(--(${picksRange}=${outcomesRange}), ${allBonusRange}),))`;
+
+  // Rank Formula - new modification to implement force-ranking when tiebreaker finalized
+  let rankFormula = '';
+  if (layout.tiebreakerInclude) {
+    const tbDiffCell = `R[0]C${layout.tiebreakerCol + 1}`;
+    const allTbDiffRange = `R${layout.entryRowStart}C${layout.tiebreakerCol + 1}:R${layout.entryRowEnd}C${layout.tiebreakerCol + 1}`;
+    const tbOutcomeCell = `R${layout.outcomeRow}C${layout.tiebreakerCol}`;
+    
+    // Composite Rank: Points * 1000 - Difference (Tiebreaker winner gets #1, runner-up gets #2)
+    rankFormula = `=IFERROR(IF(ISBLANK(${pointsCell}), "", IF(AND(NOT(ISBLANK(${tbOutcomeCell})), ISNUMBER(${tbOutcomeCell})), RANK(${pointsCell} * 1000 - IFERROR(${tbDiffCell}, 999), ARRAYFORMULA(${allPointsRange} * 1000 - IFERROR(${allTbDiffRange}, 999)), 0), RANK(${pointsCell}, ${allPointsRange}, 0))), "")`;
+  } else {
+    rankFormula = `=IFERROR(IF(NOT(ISBLANK(${pointsCell})), RANK(${pointsCell}, ${allPointsRange}, 0), ""), "")`;
+  }
+
+  sheet.getRange(layout.entryRowStart, layout.rankCol, layout.numPlayers).setFormulaR1C1(rankFormula);
+  // Percent Correct Formula (using efficient SUMPRODUCT)
+  const percentFormula = `=IFERROR(IF(COUNTA(${outcomesRange}) > 0, SUMPRODUCT(--(${picksRange}=${outcomesRange}), --(${outcomesRange}<>"")) / COUNTA(${outcomesRange}),""))`;
+
+  // Chances formula (uses external function) for all rows
+  const chancesFormula = `=calculateWinProbability(${allPicksRange},${outcomesRange},${allPointsRange},${allBonusRange},${allWinnersRange},${allSpreadsRange})`;
+
+  // Sparkline Formula (leverages chances column adjacent)
+  const sparklineFormula = `=IFERROR(IF(NOT(ISBLANK(${pointsCell})), SPARKLINE(MAX(${chancesCell},0.05),{"charttype","bar";"max",1;"color1",IF(${chancesCell}=max(${allChancesRange}),"#33ff7a",IF(${chancesCell}<(max(${allChancesRange})/3),"#ffa579","#ffe433"))}),),)`
+  
+  // Wildcard Formula (uses external function) for all rows
+  const wildCardFormula = `=calculateWildcardScore(${allPicksRange})`;
+
+  // Tiebreaker Difference Formula
+  const tiebreakerDiffFormula = `=IFERROR(IF(OR(ISBLANK(R[0]C[-1]), ISBLANK(R${layout.outcomeRow}C${layout.tiebreakerCol})),, ABS(R[0]C[-1] - R${layout.outcomeRow}C${layout.tiebreakerCol})))`;
+
+  // Similar Pickers Formula
+  const similarPickersFormula = `=IFERROR(IF(ISBLANK(R[0]C${layout.firstMatchupCol}),, TRANSPOSE(ARRAYFORMULA({(${layout.matchups} - QUERY({R${layout.entryRowStart}C1:R${layout.entryRowEnd}C1, ARRAYFORMULA(MMULT(IF(${allPicksRange}=${picksRange},1,0),TRANSPOSE(ARRAYFORMULA(COLUMN(${picksRange})^0))))}, "select Col2 where Col1 <> '"&R[0]C1&"' order by Col2 desc, Col1 asc limit ${layout.diffCount}")) & ": " & QUERY({R${layout.entryRowStart}C1:R${layout.entryRowEnd}C1, ARRAYFORMULA(MMULT(IF(${allPicksRange}=${picksRange},1,0),TRANSPOSE(ARRAYFORMULA(COLUMN(${picksRange})^0))))}, "select Col1 where Col1 <> '"&R[0]C1&"' order by Col2 desc, Col1 asc limit ${layout.diffCount}")}))))`;
+
+  // Apply formulas to ranges
+  sheet.getRange(layout.entryRowStart, layout.pointsCol, layout.numPlayers).setFormulaR1C1(pointsFormula);
+  sheet.getRange(layout.entryRowStart, layout.rankCol, layout.numPlayers).setFormulaR1C1(rankFormula);
+  sheet.getRange(layout.entryRowStart, layout.percentCol, layout.numPlayers).setFormulaR1C1(percentFormula);
+  
+  sheet.getRange(layout.entryRowStart, layout.chancesCol).setFormulaR1C1(chancesFormula); // Only in first cell--outputs an array
+  sheet.getRange(layout.entryRowStart, layout.sparklinesCol, layout.numPlayers).setFormulaR1C1(sparklineFormula);
+  
+  sheet.getRange(layout.entryRowStart, layout.wildcardCol).setFormulaR1C1(wildCardFormula);
+
+  // diffCol is -1 for a single-member pool, where there is no cohesion column to write into
+  if (layout.diffCol > 0) {
+    sheet.getRange(layout.entryRowStart, layout.diffCol, layout.numPlayers).setFormulaR1C1(similarPickersFormula);
+  }
+
+  // Apply conditional formulas
+  if (layout.tiebreakerInclude) {
+    sheet.getRange(layout.entryRowStart, layout.tiebreakerCol + 1, layout.numPlayers).setFormulaR1C1(tiebreakerDiffFormula);
+    
+    const tiebreakerWinnerFormula = `=IFERROR(IF(COUNTA(R${layout.outcomeRow}C${layout.firstMatchupCol}:R${layout.outcomeRow}C${layout.finalMatchupCol})=VALUE(REGEXEXTRACT(R${layout.subHeaderRow}C1,"[0-9]+")), ARRAYFORMULA(IF(COUNTIF(ARRAY_CONSTRAIN({R[0]C${layout.pointsCol},R[0]C${layout.tiebreakerCol+1}}=FILTER(FILTER({${allPointsRange},R${layout.entryRowStart}C${layout.tiebreakerCol+1}:R${layout.entryRowEnd}C${layout.tiebreakerCol+1}},${allPointsRange}=MAX(${allPointsRange})),FILTER(R${layout.entryRowStart}C${layout.tiebreakerCol+1}:R${layout.entryRowEnd}C${layout.tiebreakerCol+1},${allPointsRange}=MAX(${allPointsRange}))=MIN(FILTER(R${layout.entryRowStart}C${layout.tiebreakerCol+1}:R${layout.entryRowEnd}C${layout.tiebreakerCol+1},${allPointsRange}=MAX(${allPointsRange})))),1,2),TRUE)=2,1,0))),)`;
+    sheet.getRange(allWinnersRange).setFormulaR1C1(tiebreakerWinnerFormula);
+
+  } else {
+    const noTiebreakerWinnerFormula = `=IFERROR(IF(COUNTA(R${layout.outcomeRow}C${layout.firstMatchupCol}:R${layout.outcomeRow}C${layout.finalMatchupCol})=VALUE(REGEXEXTRACT(R${layout.subHeaderRow}C1,"[0-9]+")), IF(RANK(${pointsCell}, ${allPointsRange}, 0)=1, 1, 0)),)`;
+    sheet.getRange(allWinnersRange).setFormulaR1C1(noTiebreakerWinnerFormula);
+  }
+
+  if (layout.mnfInclude) {
+    let mnfFormulaCore;
+
+    if (layout.mnfCols.length === 1) {
+      // Logic for a single MNF game (more efficient)
+      const singleCol = layout.mnfCols[0];
+      mnfFormulaCore = `-- (R[0]C${singleCol}=R${effectiveOutcomeRow}C${singleCol})`;
+    } else {
+      // Logic for multiple, non-contiguous MNF games
+      // Creates array strings like "{R[0]C19, R[0]C20}"
+      const picksArrayString = `{${layout.mnfCols.map(c => `R[0]C${c}`).join(',')}}`;
+      const resultsArrayString = `{${layout.mnfCols.map(c => `R${effectiveOutcomeRow}C${c}`).join(',')}}`;
+      mnfFormulaCore = `SUMPRODUCT(--(${picksArrayString}=${resultsArrayString}))`;
+    }
+
+    // Wrap the core logic in the standard IFERROR and readiness check
+    const mnfFormula = `=IFERROR(IF(COUNTA(${outcomesRange}) > 0, ${mnfFormulaCore},""),"")`;
+    sheet.getRange(layout.entryRowStart, layout.mnfCol, layout.numPlayers).setFormulaR1C1(mnfFormula);
+  }
+
+  // Formula for the Home/Away split summary in the summary row
+  const homeAwaySplitFormula = `=IFERROR(IF(COUNTA(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0])=0,, LET(total_picks, COUNTA(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0]), home_team, REGEXEXTRACT(R${layout.matchupRow}C[0], "[A-Z]{2,3}$"), home_picks, COUNTIF(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0], home_team), away_team, REGEXEXTRACT(R${layout.matchupRow}C[0], "^[A-Z]{2,3}"), IF(home_picks = total_picks/2, "SPLIT"&CHAR(10)&"50%", IF(home_picks > total_picks/2, home_team & CHAR(10) & ROUND(100*home_picks/total_picks,0)&"%", away_team & CHAR(10) & ROUND(100*(total_picks-home_picks)/total_picks,0)&"%")))))`;
+  sheet.getRange(layout.summaryRow, layout.firstMatchupCol, 1, layout.matchups).setFormulaR1C1(homeAwaySplitFormula);
+
+  // Formula to calculate the winner based on the spread
+  const spreadOutcomeFormula = `=IFERROR(IF(OR(ISBLANK(R${layout.outcomeRow}C[0]), ISBLANK(R${layout.outcomeMarginRow}C[0])),, LET(
+    winner, R${layout.outcomeRow}C[0],
+    margin, R${layout.outcomeMarginRow}C[0],
+    spread_cell_text, R${layout.spreadRow}C[0],
+    full_matchup_text, R${layout.matchupRow}C[0],
+    
+    favored_team, IFERROR(REGEXEXTRACT(spread_cell_text, "^[A-Z]{2,3}")),
+    spread_line, IFERROR(VALUE(REGEXEXTRACT(spread_cell_text, "[-+][0-9\.]+"))),
+    cover_number, ABS(spread_line),
+    
+    contrarian_team, IFERROR(TRIM(SUBSTITUTE(SUBSTITUTE(full_matchup_text, favored_team,""), "@",""))),
+    
+    IF(winner = "TIE", contrarian_team,
+      IF(margin = cover_number, "TIE",
+        IF(winner = favored_team,
+          IF(margin > cover_number, favored_team, contrarian_team),
+          contrarian_team
+        )
+      )
+    )
+  )))`;
+
+  
+  sheet.getRange(layout.spreadOutcomeRow, layout.firstMatchupCol, 1, layout.matchups).setFormulaR1C1(spreadOutcomeFormula);
+  
+  // Points column headers and summary
+  sheet.getRange(layout.subHeaderRow, layout.pointsCol).setFormulaR1C1(`=IF(COUNTIF(${allBonusRange},">1")>0, "Points", "Picks")`);
+  sheet.getRange(layout.summaryRow, layout.pointsCol).setFormulaR1C1(`=IFERROR(IF(SUM(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0])>0, "Average:"&CHAR(10)&TEXT(ROUND(AVERAGE(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0]),1),"#.0"),),)`);
+
+  // Rank column summary formula
+  sheet.getRange(layout.summaryRow, 3).setFormulaR1C1(`=IFERROR(IF(COUNTIF(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0],1)>1,COUNTIF(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0],1)&"-Way"&CHAR(10)&"Tie","Leader:"&CHAR(10)&INDEX(R${layout.entryRowStart}C1:R${layout.entryRowEnd}C1,MATCH(1,R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0],0),1)),)`); 
+
+  // Percent summary formula
+  sheet.getRange(layout.summaryRow, 4).setFormulaR1C1(`=IFERROR(IF(COUNTA(R${layout.outcomeRow}C${layout.firstMatchupCol}:R${layout.outcomeRow}C${layout.finalMatchupCol})>2, AVERAGE(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0]),),)`);
+
+  // Wildcard column summary formula
+  sheet.getRange(layout.summaryRow, layout.wildcardCol).setFormulaR1C1(`=IFERROR(IF(SUM(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0])>0, ROUND(AVERAGE(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0]),1),),)`);
+
+  // Home/Away Bias summary formulas
+  sheet.getRange(layout.summaryRow, 5).setFormulaR1C1(`=IFERROR(IF(COUNTA(${allPicksRange})>10,"AWAY"&CHAR(10)&ROUND(100*(SUMPRODUCT(ARRAYFORMULA(--(REGEXEXTRACT(R${layout.matchupRow}C${layout.firstMatchupCol}:R${layout.matchupRow}C${layout.finalMatchupCol},"^[A-Z]{2,3}")=${allPicksRange}))))/COUNTA(${allPicksRange}),1)&"%","AWAY"),"AWAY")`);
+  sheet.getRange(layout.summaryRow, 6).setFormulaR1C1(`=IFERROR(IF(COUNTA(${allPicksRange})>10,"HOME"&CHAR(10)&ROUND(100*(SUMPRODUCT(ARRAYFORMULA(--(REGEXEXTRACT(R${layout.matchupRow}C${layout.firstMatchupCol}:R${layout.matchupRow}C${layout.finalMatchupCol},"[A-Z]{2,3}$")=${allPicksRange}))))/COUNTA(${allPicksRange}),1)&"%","HOME"),"HOME")`);
+  
+  // Tiebreaker and Winner columns
+  if (layout.tiebreakerInclude) {
+    sheet.getRange(layout.subHeaderRow, layout.winCol).setFormulaR1C1(`=IF(COUNTIF(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0],1)>1, "Tie", "Win")`);
+    sheet.getRange(layout.summaryRow, layout.winCol).setFormulaR1C1(`=IFERROR(IF(NOT(ISBLANK(R${layout.summaryRow}C${layout.tiebreakerCol})), IF(COUNTIF(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0],1)>1, COUNTIF(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0],1)&"-WAY"&CHAR(10)&"TIE",),),)`);
+    sheet.getRange(layout.summaryRow, layout.tiebreakerCol).setFormulaR1C1(`=IFERROR(IF(SUM(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0])>0, "AVG"&CHAR(10)&ROUND(AVERAGE(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0]),1),),)`);
+    sheet.getRange(layout.summaryRow, layout.tiebreakerCol + 1).setFormulaR1C1(`=IFERROR(IF(SUM(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0])>0, "AVG"&CHAR(10)&ROUND(AVERAGE(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0]),1),),)`);
+  } else {
+    sheet.getRange(layout.summaryRow, layout.winCol).setFormulaR1C1(`=IFERROR(IF(COUNTA(R${layout.outcomeRow}C${layout.firstMatchupCol}:R${layout.outcomeRow}C${layout.finalMatchupCol})=VALUE(REGEXEXTRACT(R${layout.subHeaderRow}C1,"[0-9]+")), IF(COUNTIF(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0],1)>1, COUNTIF(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0],1)&"-WAY"&CHAR(10)&"TIE", "DONE"),),)`);
+    sheet.getRange(layout.subHeaderRow, layout.winCol).setFormulaR1C1(`=IFERROR(IF(COUNTA(R${layout.outcomeRow}C${layout.firstMatchupCol}:R${layout.outcomeRow}C${layout.finalMatchupCol})=VALUE(REGEXEXTRACT(R${layout.subHeaderRow}C1,"[0-9]+")), IF(COUNTIF(R${layout.entryRowStart}C[0]:R${layout.entryRowEnd}C[0],1)=0, "Tie", "Win"), "Win"),)`);
+  }
+  
+  // MNF Summary Logic
+  if (layout.mnfCols && layout.mnfCols.length > 0) {
+    // Dynamically create a SUM of SUMPRODUCTs for each MNF column
+    const correctPicksSumString = layout.mnfCols.map(col => 
+      `SUMPRODUCT(--(R${layout.entryRowStart}C${col}:R${layout.entryRowEnd}C${col}=R${effectiveOutcomeRow}C${col}))`
+    ).join('+');
+    
+    const totalPicks = layout.totalMembers * layout.mnfCols.length;
+    
+    const mnfSummaryFormula = `=IFERROR(IF(AND(COUNTIF({${layout.mnfCols.map(c => `R${effectiveOutcomeRow}C${c}`).join(',')}},"<>")=${layout.mnfCols.length}), "MNF" & CHAR(10) & ROUND(100*(${correctPicksSumString})/${totalPicks},1)&"%",),)`;
+    
+    sheet.getRange(layout.summaryRow, layout.mnfCol).setFormulaR1C1(mnfSummaryFormula);
+  }
+
+  // Similar pickers for whole group
+  if (layout.diffCol > 0) {
+    sheet.getRange(layout.summaryRow,layout.diffCol).setFormulaR1C1(`=iferror(if(ISBLANK(R[0]C${layout.firstMatchupCol}),,transpose(query({arrayformula((counta(R${layout.matchupRow}C${layout.firstMatchupCol}:R${layout.matchupRow}C${layout.finalMatchupCol})-mmult(arrayformula(if(R${layout.entryRowStart}C${layout.firstMatchupCol}:R${layout.entryRowEnd}C${layout.finalMatchupCol}=arrayformula(regexextract(R${layout.totalMembers+3}C${layout.firstMatchupCol}:R${layout.totalMembers+3}C${layout.finalMatchupCol},"[A-Z]+")),1,0)),transpose(arrayformula(if(arrayformula(len(R${layout.matchupRow}C${layout.firstMatchupCol}:R${layout.matchupRow}C${layout.finalMatchupCol}))>1,1,1)))))&": "&R${layout.entryRowStart}C1:R${layout.entryRowEnd}C1),mmult(arrayformula(if(R${layout.entryRowStart}C${layout.firstMatchupCol}:R${layout.entryRowEnd}C${layout.finalMatchupCol}=arrayformula(regexextract(R${layout.totalMembers+3}C${layout.firstMatchupCol}:R${layout.totalMembers+3}C${layout.finalMatchupCol},"[A-Z]+")),1,0)),transpose(arrayformula(if(arrayformula(len(R${layout.matchupRow}C${layout.firstMatchupCol}:R${layout.matchupRow}C${layout.finalMatchupCol}))>1,1,1))))},"select Col1 order by Col2 desc, Col1 desc limit ${layout.diffCount}"))))`);
+  }
+
+  // NAMES COLUMN NAMED RANGE
+  range = sheet.getRange(layout.entryRowStart,1,layout.totalMembers,1);
+  ss.setNamedRange(`NAMES_${layout.week}`,range);
+
+  // TOTALS
+  range = sheet.getRange(layout.entryRowStart,layout.pointsCol,layout.totalMembers,1);
+  ss.setNamedRange(`TOT_${layout.week}`,range);
+  // RANKS
+  range = sheet.getRange(layout.entryRowStart,layout.rankCol,layout.totalMembers,1);
+  ss.setNamedRange(`RNK_${layout.week}`,range);
+  // PERCENT
+  ss.setNamedRange(`PCT_${layout.week}`,sheet.getRange(layout.entryRowStart,layout.percentCol,layout.totalMembers,1)); // Range for formatting below includes summary row
+  // CHANCES
+  range =  sheet.getRange(layout.entryRowStart,layout.chancesCol,layout.totalMembers,1);
+  ss.setNamedRange(`CHANCES_${layout.week}`,range);
+  // WILDCARD
+  const wildcardRange = sheet.getRange(layout.entryRowStart, layout.wildcardCol, layout.totalMembers, 1);
+  ss.setNamedRange(`WILDCARD_${layout.week}`, wildcardRange);
+  // WINNER COLUMN
+  range = sheet.getRange(layout.entryRowStart,layout.winCol,layout.totalMembers,1);
+  ss.setNamedRange(`WIN_${layout.week}`,range);
+  // MNF
+  if (layout.mnfInclude) {
+    range = sheet.getRange(layout.entryRowStart,layout.mnfCol,layout.totalMembers,1);
+    ss.setNamedRange(`MNF_${layout.week}`,range);
+  }
+
+  // Paid checkboxes and the summary cell below them; the formatting of both is applied later
+  if (layout.paidCheckboxes) {
+    sheet.getRange(layout.entryRowStart, layout.paidCol, layout.totalMembers, 1).insertCheckboxes();
+    sheet.getRange(layout.entryRowEnd + 1, layout.paidCol).setFormulaR1C1(layout.paid.summaryFormula);
+  }
+
+  // RESTORE STATE: If we successfully scraped data, repopulate it now.
+  if (rebuild && existingData && newMatchupMap) {
+    Logger.log(`🔄 Restoring preserved data into new sheet structure...`);
+    remapAndRepopulateData(ss, layout.week, existingData, newMatchupMap, layout.members.map(m => m[0]));
+    ss.toast(`✅ Data successfully restored for week ${layout.week}.`, 'SUCCESS');
+  } else if (existingData && !newMatchupMap) {
+      Logger.log(`⚠️ ERROR: Scraped old data but failed to get a new game map. Data could not be restored.`);
+      ss.toast(`ERROR: Could not restore data.`, `⚠️ ERROR`);
+  }
+
+  return { sheet, existingData, newMatchupMap };
 }
 
 // WEEKLY Sheet Function - creates a sheet with provided week, members [array], and if data should be restored
