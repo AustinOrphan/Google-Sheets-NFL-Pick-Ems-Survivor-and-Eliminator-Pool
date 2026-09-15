@@ -1,7 +1,39 @@
 'use strict';
 
 const { describe, it, assert } = require('./run.js');
-const { load } = require('./harness.js');
+const { load, APPS_SCRIPT_GLOBALS } = require('./harness.js');
+
+const INSPECT = Symbol.for('nodejs.util.inspect.custom');
+
+// Module-level helpers computeWeeklyLayout must never reach for - if it
+// did, it would be reading/writing a live sheet's row/column count rather
+// than computing geometry from its own arguments.
+const MODULE_HELPER_NAMES = ['adjustRows', 'adjustColumns'];
+
+// A property access, call, construction, or assignment on this raises
+// immediately, unlike the harness's normal makeStub() (tests/harness.js),
+// which silently swallows everything so top-level Apps Script calls in
+// picks.gs don't crash the eval. Swapping the real Apps Script globals and
+// module helpers for THIS stub during a single computeWeeklyLayout() call
+// is what makes the "touches no sheet" test below an actual purity check:
+// an impure call now throws instead of silently no-op'ing.
+function makeThrowingStub(name) {
+  const fail = (detail) => {
+    throw new Error(`impure: computeWeeklyLayout touched ${name}${detail} - it must be a pure function of its arguments`);
+  };
+  return new Proxy(function throwingStub() {}, {
+    get(_t, prop) {
+      if (prop === 'then') return undefined;          // never look thenable
+      if (prop === INSPECT) return () => `[ThrowingStub ${name}]`;
+      if (prop === 'toString') return () => `[ThrowingStub ${name}]`;
+      if (typeof prop === 'symbol') return undefined;
+      fail(`.${String(prop)}`);
+    },
+    apply() { fail('()'); },
+    construct() { fail('(...) via new'); },
+    set() { fail(' (assignment)'); },
+  });
+}
 
 const TEAMS = [
   ['BUF','NYJ'],['KC','LV'],['DAL','PHI'],['SF','SEA'],['GB','CHI'],['BAL','CIN'],
@@ -149,10 +181,39 @@ describe('computeWeeklyLayout', () => {
   });
 
   it('touches no sheet — pure given its arguments', () => {
-    const a = build();
-    const b = build();
-    assert.deepEqual(a.headers, b.headers);
-    assert.deepEqual(a.matchupDescriptors.map(d => d.col), b.matchupDescriptors.map(d => d.col));
+    // Calling twice and deep-equaling the results (the previous version of
+    // this test) does NOT prove purity: the harness's normal stubs
+    // (tests/harness.js makeStub()) swallow every Apps Script call
+    // silently, so an impure call - e.g. SpreadsheetApp.getActiveSheet()
+    // .getRange(1,1).setValue(...) - neither throws nor changes the
+    // returned layout object. This test instead swaps every Apps Script
+    // global, PLUS the module-level adjustRows/adjustColumns helpers, for
+    // a stub that throws on ANY access, then asserts computeWeeklyLayout
+    // still completes normally and returns a real layout. Restored in
+    // `finally` so later tests see the normal permissive stubs again.
+    //
+    // Logger is included in the throwing set (not kept permissive):
+    // computeWeeklyLayout (picks.gs:9816-10080) contains no Logger.log
+    // call, confirmed by inspection, so Logger.log is not a call this
+    // function is expected to make.
+    const { computeWeeklyLayout } = load();
+    const throwingNames = [...APPS_SCRIPT_GLOBALS, ...MODULE_HELPER_NAMES];
+    const saved = new Map(throwingNames.map(name => [name, globalThis[name]]));
+
+    try {
+      for (const name of throwingNames) globalThis[name] = makeThrowingStub(name);
+
+      const f = fixtures();
+      const l = computeWeeklyLayout(f.week, f.config, f.forms, f.memberData, f.observed);
+
+      assert.ok(l, 'computeWeeklyLayout returned a falsy layout under throwing stubs');
+      assert.ok(Array.isArray(l.headers) && l.headers.length > 0,
+        'layout.headers looks incomplete under throwing stubs');
+      assert.ok(Array.isArray(l.matchupDescriptors) && l.matchupDescriptors.length > 0,
+        'layout.matchupDescriptors looks incomplete under throwing stubs');
+    } finally {
+      for (const [name, value] of saved) globalThis[name] = value;
+    }
   });
 
   it('finalCol / headers / widths / subHeaders / fontSizes / subFontSizes stay in lockstep for every member count', () => {

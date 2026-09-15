@@ -27,7 +27,26 @@
 
 const { load } = require('./harness.js');
 
-const ENTRIES = ['applyWeeklyFormatting'];   // Task 11 appends applySimpleFormatting
+// Every entry has a `kind`, which decides what "safe" means for it:
+//
+//   'formatting' - a sheet-mutating entry point (e.g. applyWeeklyFormatting).
+//     BANNED write APIs may never appear anywhere in its transitive call
+//     graph, and it MUST call clearFormat() itself (REQUIRED) - the whole
+//     point of this entry shape is reformat-via-clearFormat-then-reapply,
+//     never raw writes.
+//
+//   'pure' - a function that must never touch the Apps Script surface at
+//     all (e.g. computeWeeklyLayout, which computes layout geometry as a
+//     plain function of its arguments). PURE_BANNED bans the Apps Script
+//     globals outright (SpreadsheetApp, PropertiesService, HtmlService,
+//     DriveApp, UrlFetchApp, FormApp, ScriptApp), SpreadsheetApp-derived
+//     calls, and the module-level adjustRows/adjustColumns/getMaxRows/
+//     getMaxColumns helpers. clearFormat() is not required - a pure
+//     function has no sheet to reset.
+const ENTRIES = [
+  { name: 'applyWeeklyFormatting', kind: 'formatting' },   // Task 11 appends applySimpleFormatting
+  { name: 'computeWeeklyLayout',   kind: 'pure' },
+];
 
 const BANNED = [
   ['setValue',         /\.setValue\s*\(/],
@@ -46,6 +65,29 @@ const BANNED = [
 ];
 
 const REQUIRED = [['clearFormat', /\.clearFormat\s*\(/]];
+
+// Banned surface for kind 'pure' - the whole Apps Script API, not just the
+// write subset BANNED covers. A pure function isn't just forbidden from
+// writing; it must never read or reference the sheet at all.
+const PURE_BANNED = [
+  ['SpreadsheetApp',    /\bSpreadsheetApp\b/],
+  ['PropertiesService', /\bPropertiesService\b/],
+  ['HtmlService',       /\bHtmlService\b/],
+  ['DriveApp',          /\bDriveApp\b/],
+  ['UrlFetchApp',       /\bUrlFetchApp\b/],
+  ['FormApp',           /\bFormApp\b/],
+  ['ScriptApp',         /\bScriptApp\b/],
+  ['getRange',          /\.getRange\s*\(/],
+  ['setValue',          /\.setValue\s*\(/],
+  ['setNote',           /\.setNote\s*\(/],
+  ['setNamedRange',     /\.setNamedRange\s*\(/],
+  ['toast',             /\.toast\s*\(/],
+  ['getUi',             /\.getUi\s*\(/],
+  ['adjustRows',        /\badjustRows\s*\(/],
+  ['adjustColumns',     /\badjustColumns\s*\(/],
+  ['getMaxRows',        /\.getMaxRows\s*\(/],
+  ['getMaxColumns',     /\.getMaxColumns\s*\(/],
+];
 
 function declaredFunctionNames(src) {
   const names = new Set();
@@ -138,6 +180,45 @@ function skipRegexLiteral(src, i) {
 // template literals (with nested `${...}` interpolation), and regex
 // literals as opaque - their contents never affect brace depth. Returns -1
 // if the braces never balance (truncated/invalid input).
+//
+// opaqueSpanEnd() below recognises exactly which spans are "not real code"
+// (line comment, block comment, quoted string, regex literal) and is
+// shared verbatim with stripNonCode() further down - the fix for the
+// bare-word callee scan (and banned-API detection) matching inside a
+// comment or string. picks.gs:10052 is a COMMENT that happens to contain
+// the word "weeklySheet" ("Fixed-column header notes. weeklySheet still
+// applies these itself..."); before stripNonCode() existed that single
+// word pulled all 1,033 lines of weeklySheet into computeWeeklyLayout's
+// transitive scan. findMatchingBrace() and stripNonCode() both drive the
+// same opaque-span detection and the same template-literal nesting stack,
+// so they can never disagree about what counts as real code.
+
+// Given src[i] is NOT inside template-literal text (i.e. we're at "code"
+// position - possibly nested inside a `${...}` interpolation), returns the
+// index one past the line comment / block comment / quoted string / regex
+// literal starting at i, or -1 if src[i] does not start one of those.
+function opaqueSpanEnd(src, i) {
+  const c = src[i];
+  if (c === '/' && src[i + 1] === '/') {
+    const nl = src.indexOf('\n', i);
+    return nl === -1 ? src.length : nl; // stop before '\n' - caller sees it as an ordinary char
+  }
+  if (c === '/' && src[i + 1] === '*') {
+    const end = src.indexOf('*/', i + 2);
+    return end === -1 ? src.length : end + 2;
+  }
+  if (c === '"' || c === "'") {
+    const quote = c;
+    let j = i + 1;
+    while (j < src.length && src[j] !== quote && src[j] !== '\n') {
+      j += src[j] === '\\' ? 2 : 1;
+    }
+    return j + 1; // consume closing quote (or step past newline/EOF on unterminated string)
+  }
+  if (c === '/' && isRegexContext(src, i)) return skipRegexLiteral(src, i);
+  return -1;
+}
+
 function findMatchingBrace(src, start) {
   const stack = ['{'];
   let i = start + 1;
@@ -153,29 +234,11 @@ function findMatchingBrace(src, start) {
       continue;
     }
 
-    const c = src[i];
+    const span = opaqueSpanEnd(src, i);
+    if (span !== -1) { i = span; continue; }
 
-    if (c === '/' && src[i + 1] === '/') {
-      const nl = src.indexOf('\n', i);
-      i = nl === -1 ? src.length : nl + 1;
-      continue;
-    }
-    if (c === '/' && src[i + 1] === '*') {
-      const end = src.indexOf('*/', i + 2);
-      i = end === -1 ? src.length : end + 2;
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      const quote = c;
-      i++;
-      while (i < src.length && src[i] !== quote && src[i] !== '\n') {
-        i += src[i] === '\\' ? 2 : 1;
-      }
-      i++; // consume closing quote (or step past newline/EOF on unterminated string)
-      continue;
-    }
+    const c = src[i];
     if (c === '`') { stack.push('`'); i++; continue; }
-    if (c === '/' && isRegexContext(src, i)) { i = skipRegexLiteral(src, i); continue; }
     if (c === '{') { stack.push('{'); i++; continue; }
     if (c === '}') {
       stack.pop();
@@ -186,6 +249,56 @@ function findMatchingBrace(src, start) {
     i++;
   }
   return -1;
+}
+
+// Returns a copy of `src` with every line comment, block comment, quoted
+// string, template-literal text chunk, and regex literal blanked out
+// (replaced with spaces; newlines are kept, so line counts are
+// unaffected). Real code - identifiers, operators, template-literal
+// `${...}` interpolation, backticks, braces - passes through unchanged.
+//
+// Callers run BANNED/REQUIRED/callee-bare-word regex tests against
+// stripNonCode(body), never against the raw body text, so a word that
+// merely appears in a comment or string can no longer be mistaken for a
+// real reference. This does NOT narrow the bare-word matching itself
+// (still no trailing '(' required, so `.forEach(callbackByReference)`
+// stays reachable) - it only removes text that was never real code in the
+// first place.
+//
+// Deliberately reuses findMatchingBrace()'s exact state machine
+// (opaqueSpanEnd() plus the same backtick/`${`-nesting stack) rather than
+// re-implementing comment/string detection a second time - see the block
+// comment above findMatchingBrace() for why the two must never diverge.
+function stripNonCode(src) {
+  const dst = src.split('');
+  const blank = (from, to) => {
+    for (let k = from; k < to; k++) if (dst[k] !== '\n') dst[k] = ' ';
+  };
+
+  const stack = [];
+  let i = 0;
+  while (i < src.length) {
+    const top = stack[stack.length - 1];
+
+    if (top === '`') {
+      const c = src[i];
+      if (c === '\\') { blank(i, i + 2); i += 2; continue; }
+      if (c === '`') { stack.pop(); i++; continue; }                             // backtick stays as code
+      if (c === '$' && src[i + 1] === '{') { stack.push('{'); i += 2; continue; } // '${' stays as code
+      blank(i, i + 1); i++;                                                       // template text - opaque
+      continue;
+    }
+
+    const span = opaqueSpanEnd(src, i);
+    if (span !== -1) { blank(i, span); i = span; continue; }
+
+    const c = src[i];
+    if (c === '`') { stack.push('`'); i++; continue; }
+    if (c === '{') { stack.push('{'); i++; continue; }
+    if (c === '}') { stack.pop(); i++; continue; }
+    i++;
+  }
+  return dst.join('');
 }
 
 // Thrown by bodyOf() when a declaration is a concise-body arrow function
@@ -281,7 +394,9 @@ const src = load().__source;
 const declared = declaredFunctionNames(src);
 const problems = [];
 
-for (const entry of ENTRIES) {
+for (const { name: entry, kind } of ENTRIES) {
+  const banned = kind === 'pure' ? PURE_BANNED : BANNED;
+
   let own;
   try {
     own = bodyOf(src, entry);
@@ -292,8 +407,11 @@ for (const entry of ENTRIES) {
   }
   if (own === null) { problems.push(`${entry}: not found in picks.gs`); continue; }
 
-  for (const [label, re] of REQUIRED) {
-    if (!re.test(own)) problems.push(`${entry}: MISSING required ${label}()`);
+  if (kind === 'formatting') {
+    const ownCode = stripNonCode(own);
+    for (const [label, re] of REQUIRED) {
+      if (!re.test(ownCode)) problems.push(`${entry}: MISSING required ${label}()`);
+    }
   }
 
   const seen = new Set([entry]);
@@ -319,27 +437,38 @@ for (const entry of ENTRIES) {
       problems.push(`${entry} -> ${fname}: could not parse function body (parse failure - not scanned, treated as unsafe)`);
       continue;
     }
-    for (const [label, re] of BANNED) {
-      if (re.test(body)) problems.push(`${entry} -> ${fname}: BANNED ${label}()`);
+    // Comments/strings/regex literals are stripped BEFORE either scan
+    // below runs, so a word that only ever appears in prose (e.g.
+    // picks.gs:10052's "weeklySheet still applies these itself..." note
+    // inside computeWeeklyLayout) can no longer masquerade as a real
+    // banned call or a real callee reference. `code`, not `body`, is what
+    // both scans below test against.
+    const code = stripNonCode(body);
+
+    for (const [label, re] of banned) {
+      if (re.test(code)) problems.push(`${entry} -> ${fname}: BANNED ${label}()`);
     }
     for (const name of declared) {
       // Bare-word match, deliberately NOT requiring a following '(' - a
       // callee passed by reference (`.forEach(mutateViaCallback)`,
       // `.map(Number)`) is exactly as reachable as one that's called
       // directly, and requiring '(' made the old regex blind to it (Gap
-      // B). This is intentionally over-approximate: matching a name that
-      // merely appears in a comment or string, not just a real reference,
-      // only causes the gate to scan *more* code, never less - the unsafe
-      // direction is a false negative, not a false positive.
+      // B). This is intentionally over-approximate across REAL code:
+      // matching a bare mention anywhere in the actual call graph, not
+      // just a direct call, only causes the gate to scan *more* code,
+      // never less - the unsafe direction is a false negative, not a
+      // false positive. stripNonCode() (above) is what keeps this
+      // over-approximation from also firing on comments/strings, which
+      // are never real references and were never meant to be in scope.
       //
-      // `seen` (not `body`) is what stops a function from re-enqueueing
+      // `seen` (not `code`) is what stops a function from re-enqueueing
       // itself: `fname` is always added to `seen` before its body is ever
       // scanned (either as the seed entry, or at the moment it was
       // discovered as a callee below), so a bare mention of fname's own
       // name inside its own body - self-recursion, a self-referential
       // comment, whatever - is skipped by `!seen.has(name)` regardless of
       // why it appears.
-      if (!seen.has(name) && new RegExp(`\\b${name}\\b`).test(body)) {
+      if (!seen.has(name) && new RegExp(`\\b${name}\\b`).test(code)) {
         seen.add(name); queue.push(name);
       }
     }
