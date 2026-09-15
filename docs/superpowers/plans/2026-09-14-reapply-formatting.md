@@ -610,10 +610,20 @@ source lines listed in this task's header, verbatim except where noted.
 
 Two faithfulness rules while porting:
 
-1. **Keep `diffCount` exactly as written** at picks.gs:9886 —
-   `(totalMembers - 1) >= 5 ? 5 : (totalMembers - 1)`. It yields 0 for a 1-member pool, which
-   is arguably a latent defect, but changing it here would silently alter build-path behaviour.
-   Recorded as a follow-up in Task 13, not fixed in this task.
+1. **`diffCount` and the single-member pool.** picks.gs:9886 computes
+   `(totalMembers - 1) >= 5 ? 5 : (totalMembers - 1)`, which is 0 when one member is shown.
+   The original then evaluates `Array(diffCount-1)` → `Array(-1)` → `RangeError`, and
+   `finalCol = diffCol + (diffCount-1)` lands one column short.
+
+   This is **reachable in production**, not a degenerate case: with `config.hideNonParticipants`
+   on, the grid is built from respondents only, so a week with one submission so far has
+   `totalMembers === 1`. The crash is invisible today because the only caller sits inside the
+   try/catch at picks.gs:5415.
+
+   Fix it properly rather than porting the crash: when `diffCount <= 0` there is nobody to
+   compare against, so **omit the cohesion/diff column entirely** — no header, no width, no
+   note, and `finalCol` ends at the column before it. Add a test asserting
+   `finalCol === headers.length === widths.length` for `memberCount: 1`.
 2. **Return `null` only for the contract's condition** — `forms?.[week]?.gamePlan` absent. Do
    not add a zero-games guard; that would change behaviour the spec did not sanction.
 
@@ -635,8 +645,17 @@ loop. Build it in the same iteration order so `col` ascends from `firstMatchupCo
 ```
 
 Collect `notes` and `outcomeValidations` as data rather than applying them — they are applied
-in Task 5, after the grid is sized. Include every `setNote` currently at picks.gs:9990, 9991,
-10011, 10024, 10036, 10047, 10060, and the tiebreaker outcome note at picks.gs:10755.
+in Task 5, after the grid is sized. Include every `setNote` in the original `weeklySheet`. Enumerating them by the
+column they annotate rather than by line number, since line numbers shift as the extraction
+proceeds: the two tiebreaker header notes, the tiebreaker **outcome** note, the MNF note, the
+comments note, the wildcard note, the cohesion/diff note, the paid note, **and the four
+column-header notes on `pointsCol`, `rankCol`, `percentCol` and `chancesCol`**. Those last
+four are easy to miss — they sit apart from the others, after the header `setValues` — and a
+reformat that drops them silently strips four tooltips off every weekly sheet.
+
+Note that the `chancesCol` note reads `config.pickemsAts` while `layout.isAts` is derived from
+`forms[week].gamePlan.pickemsAts`. Keep the note reading `config.pickemsAts` verbatim; do not
+silently unify the two sources as part of this extraction.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
