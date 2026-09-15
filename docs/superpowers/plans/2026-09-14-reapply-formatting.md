@@ -1020,7 +1020,14 @@ characters rather than the message.
 - [ ] **Step 2: Verify the function shrank and still parses**
 
 Run: `awk '/^function weeklySheet\(/,/^}$/' picks.gs | wc -l`
-Expected: under 45 lines (was 1,033).
+Expected: roughly 60 lines (was 1,033).
+
+Not the "under 45" this plan originally guessed. Thirteen statements have no home in any of
+the three extractions and must stay here: the `totalMembers <= 0` guard with its
+`⚠️ MEMBER ISSUE` alert, eight pool-config diagnostic logs, the per-MNF-game column log, and
+the matchup-map log. The zero-member guard matters most — `computeWeeklyLayout` returns a
+degenerate *object* (not `null`) when no members are shown, so `if (!layout) return null`
+does NOT cover that case and dropping the guard would build a malformed sheet silently.
 
 Run: `cp picks.gs /tmp/p.js && node --check /tmp/p.js && echo SYNTAX_OK`
 Expected: `SYNTAX_OK`
