@@ -60,3 +60,8 @@ Task 2: implemented (8c38376) + fix pass (17949ef). Review: spec OK, fidelity CL
   live alias not a copy.
   Follow-up for Task 13: chancesCol note reads config.pickemsAts while layout.isAts reads
   gamePlan.pickemsAts - two sources, can disagree. Ported verbatim, not reconciled.
+Task 2: COMPLETE (commits 8c38376..9ecb36c, 2 fix passes, review fidelity-clean)
+  Gate now has entry KINDS: 'formatting' (banned writes + required clearFormat) and
+  'pure' (bans all Apps Script surface). computeWeeklyLayout registered as pure.
+  Comment/string stripping before callee discovery killed the false-positive class;
+  verified picks.gs:10052 still contains the word weeklySheet and the gate stays clean.
