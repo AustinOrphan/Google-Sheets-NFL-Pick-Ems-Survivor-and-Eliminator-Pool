@@ -263,3 +263,15 @@ Task 12: COMPLETE (commit e85a035) - NOT a refactor; fixes live data loss.
   user needs: the FIRST rebuild after deploying is still lossy on each week sheet, since
   PAID_{week} does not exist until writeWeeklyContent creates it. Unrecoverable by design -
   guessing the old paid column from the new layout risks paying the wrong people.
+Task 12: COMPLETE (commits e85a035..42376fa, review APPROVED - no Critical/Important)
+  Paid status now scraped + restored BY NAME via newMemberMap, only `true` written back,
+  degrades quietly when PAID_{week} is absent. My brief's Step 4 sketch was wrong (it derived
+  a paidCol and indexed by row; the real function derives no column positions at all) -
+  implementer followed the real code. Reviewer confirmed removed members skip cleanly and a
+  mid-list insert cannot bleed into a neighbour.
+  CAVEAT FOR USER: first member-adding import after deploy still clears that week's ticks,
+  because PAID_{week} does not exist on pre-existing sheets. One re-tick per week sheet.
+Task 13: COMPLETE - all automated gates green (34 tests, gate clean 3 entries, SYNTAX_OK);
+  9 follow-ups recorded in the spec. Manual checklist remains for the user.
+
+ALL 12 TASKS COMPLETE. Final whole-branch review next.
