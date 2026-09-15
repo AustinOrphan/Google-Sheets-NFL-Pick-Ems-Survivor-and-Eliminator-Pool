@@ -44,7 +44,8 @@ const { load } = require('./harness.js');
 //     getMaxColumns helpers. clearFormat() is not required - a pure
 //     function has no sheet to reset.
 const ENTRIES = [
-  { name: 'applyWeeklyFormatting', kind: 'formatting' },   // Task 11 appends applySimpleFormatting
+  { name: 'applyWeeklyFormatting', kind: 'formatting' },
+  { name: 'applySimpleFormatting', kind: 'formatting' },   // TOTAL / RNK / PCT
   { name: 'computeWeeklyLayout',   kind: 'pure' },
 ];
 

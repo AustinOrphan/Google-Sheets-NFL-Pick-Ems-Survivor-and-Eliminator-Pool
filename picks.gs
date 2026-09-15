@@ -292,6 +292,40 @@ const nameValidation = FormApp.createTextValidation()
 const scheduleTabColor = "#472a24";
 const numberMap = {10:"🔟", 9:"9️⃣", 8:"8️⃣", 7:"7️⃣", 6:"6️⃣", 5:"5️⃣", 4:"4️⃣", 3:"3️⃣", 2:"2️⃣", 1:"1️⃣", 0:"0️⃣" };  
 
+// SIMPLE DERIVED SHEETS — the per-sheet differences between TOTAL, RNK and PCT.
+// Everything these three builders do that is not identical is either a value in this table or one
+// of the conditional format rule sets in simpleConditionalRules(). Values were taken from the
+// original bodies of totSheet/rnkSheet/pctSheet and from what overallPrimaryFormulas /
+// overallMainFormulas actually leave behind — the in-body setNumberFormat calls those two helpers
+// used to overwrite were dead code and are NOT what these formats are based on.
+//   hasAvgRow       - TOTAL and PCT carry a trailing greyed averages row; RNK does not. It is also
+//                     the trailing argument both formula helpers take (they call it `avgRow`).
+//   *RangeName      - the named ranges are historical and do not follow one prefix: RNK's overall
+//                     range is TOT_OVERALL_RANK, not TOT_OVERALL_RNK.
+//   avgLabel        - only PCT labels its averages row today. TOTAL writes 'AVERAGES' into A2,
+//                     which the member names immediately overwrite, so TOTAL's averages row is
+//                     blank on screen. Preserved as-is rather than silently "fixed" here.
+const SIMPLE_SHEET_SPECS = {
+  TOT: {
+    sheetName: 'TOTAL',  cornerLabel: 'CORRECT',      totalLabel: 'TOTAL',   avgLabel: null,
+    rangePrefix: 'TOT',  primaryAction: 'sum',        hasAvgRow: true,       weekColWidth: 30,
+    namesRangeName: 'TOT_OVERALL_NAMES', overallRangeName: 'TOT_OVERALL', weeklyRangeName: 'TOT_WEEKLY',
+    overallFormat: '##', weekFormat: '#0', avgOverallFormat: '#0.0', avgWeekFormat: '##%',
+  },
+  RNK: {
+    sheetName: 'RNK',    cornerLabel: 'RANKS',        totalLabel: 'AVERAGE', avgLabel: null,
+    rangePrefix: 'RNK',  primaryAction: 'average',    hasAvgRow: false,      weekColWidth: 48,
+    namesRangeName: 'TOT_OVERALL_RNK_NAMES', overallRangeName: 'TOT_OVERALL_RANK', weeklyRangeName: 'TOT_WEEKLY_RANK',
+    overallFormat: '#0.0', weekFormat: '#0', avgOverallFormat: null, avgWeekFormat: null,
+  },
+  PCT: {
+    sheetName: 'PCT',    cornerLabel: 'PERCENTAGES',  totalLabel: 'AVERAGE', avgLabel: 'AVERAGES',
+    rangePrefix: 'PCT',  primaryAction: 'average',    hasAvgRow: true,       weekColWidth: 48,
+    namesRangeName: 'TOT_OVERALL_PCT_NAMES', overallRangeName: 'TOT_OVERALL_PCT', weeklyRangeName: 'TOT_WEEKLY_PCT',
+    overallFormat: '##.#%', weekFormat: '##.#%', avgOverallFormat: '##.#%', avgWeekFormat: '##%',
+  },
+};
+
 const LEAGUE_DATA = {
   "ARI": {
     "division": "NFC West",
@@ -7238,291 +7272,244 @@ function deploySeasonSheet() {
   ctx.ss.toast('Season Performance sheet deployed successfully!', '🗓️ SEASON READY');
 }
 
-// TOTAL Sheet Creation / Adjustment
-function totSheet(ss,memberData) {
-  ss = fetchSpreadsheet(ss);
-  
-  let docProps;
-  if (!memberData) docProps = PropertiesService.getDocumentProperties();
-  memberData = memberData || JSON.parse(docProps.getProperty('members')) || {};
-  const memberNames = memberData.memberOrder.map(id => [memberData.members[id]?.name]);
-  const totalMembers = memberNames.length;
-  
-  let sheetName = 'TOTAL';
-  let sheet = ss.getSheetByName(sheetName);
-  if (sheet == null) {
-    sheet = ss.insertSheet(sheetName);
+// ---------------------------------------------------------------------------
+// TOTAL / RNK / PCT — the three simple derived sheets.
+//
+// These are the same sheet three times over: a member column, an overall column, one column per
+// week, and (for TOTAL and PCT) a trailing averages row. They now use the same
+// layout / content / formatting split as the weekly sheet, driven by SIMPLE_SHEET_SPECS.
+//
+// The one part that is genuinely not shared is the conditional format rules: the three sheets
+// differ in rule kind (RNK flags the weekly winner with whenNumberEqualTo(1), the other two
+// compare against the column maximum), gradient direction (RNK inverts — 1 is best), anchor
+// values, range extent (PCT's gradients run through the averages row, TOTAL's stop above it) and
+// rule ORDER, which decides which rule wins a cell. Flattening all of that into the spec table
+// would have meant inventing a rule mini-language, so it lives in simpleConditionalRules()
+// instead — one explicit three-way branch rather than a leaky abstraction.
+// ---------------------------------------------------------------------------
+
+// SIMPLE LAYOUT — pure geometry for a TOT/RNK/PCT sheet. Takes no sheet and touches no Apps
+// Script service: every value is a function of the spec and the member list, so it can be reasoned
+// about (and tested) without a spreadsheet. Returns null for an unknown spec key.
+function computeSimpleLayout(specKey,memberData) {
+
+  const spec = SIMPLE_SHEET_SPECS[specKey];
+  if (!spec) {
+    return null;
   }
 
-  sheet.clear();
-  sheet.setTabColor(generalTabColor);
-  
-  let rows = totalMembers+2;
-  let maxRows = sheet.getMaxRows();
-  if (rows < maxRows) {
-    sheet.deleteRows(rows,maxRows-rows);
-  } else if (rows > maxRows){
-    sheet.insertRows(maxRows,rows-maxRows);
-  }
+  memberData = memberData || {};
+  const memberOrder = memberData.memberOrder || [];
+  const roster = memberData.members || {};
+  // Nx1, matching the weekly layout's `members` shape so setValues can take it directly
+  const members = memberOrder.map(id => [roster[id]?.name]);
+  const totalMembers = members.length;
 
-  maxRows = sheet.getMaxRows();
-  let maxCols = sheet.getMaxColumns();
   const weeks = Array.from({ length: WEEKS }, (_, index) => index + 1).filter(week => !WEEKS_TO_EXCLUDE.includes(week));
-  if ( weeks.length + 2 < maxCols ) {
-    sheet.deleteColumns(weeks.length + 2,maxCols-(weeks.length + 2));
-  }
-  maxCols = sheet.getMaxColumns();
-  sheet.getRange(1,1).setValue('CORRECT');
-  sheet.getRange(1,2).setValue('TOTAL');
-  sheet.getRange(2,1).setValue('AVERAGES');
 
-  for (let a = 0; a < weeks.length; a++) {
-    sheet.getRange(1, a + 3).setValue(weeks[a]);
-    sheet.setColumnWidth(a + 3, 30);
-    sheet.getRange(2, a + 3).setFormula(`=IFERROR(ARRAYFORMULA(COUNTIF(FILTER(INDIRECT("${LEAGUE}_PICKS_${weeks[a]}"), INDIRECT("NAMES_${weeks[a]}")=$A2)=INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_${weeks[a]}"), TRUE)), "")`);
-  }
-  
-  let range = sheet.getRange(1,1,rows,maxCols);
-  range.setHorizontalAlignment('center').setVerticalAlignment('middle').setFontSize(10).setFontFamily("Montserrat");
-  sheet.getRange(2,1,totalMembers,1).setValues(memberNames); 
-  sheet.getRange(1,1,rows,1).setHorizontalAlignment('left');
-  sheet.setColumnWidth(1,120);
-  sheet.setColumnWidth(2,70);
-  
-  range = sheet.getRange(1,1,1,maxCols).setBackground('black').setFontColor('white');
-  
-  sheet.getRange(rows,1,1,weeks.length+2).setBackground('#e6e6e6');
-  
-  sheet.getRange(2,2,totalMembers+1,weeks.length+1).setNumberFormat('#.#');
+  const entryRowStart = 2;                                  // row 1 is the header row
+  const entryRowEnd = entryRowStart + totalMembers - 1;
+  const avgRow = spec.hasAvgRow ? entryRowEnd + 1 : null;   // null on RNK, which has no averages row
+  const rows = spec.hasAvgRow ? totalMembers + 2 : totalMembers + 1;
+  const finalCol = weeks.length + 2;                        // member column, overall column, then one per week
 
-  sheet.setFrozenColumns(2);
-  sheet.setFrozenRows(1); 
-
-  // SET OVERALL NAMES Range
-  let rangeOverallTotNames = sheet.getRange(2, 1, totalMembers, 1);
-  ss.setNamedRange('TOT_OVERALL_NAMES', rangeOverallTotNames);   
-  
-  let rangeOverallTot = sheet.getRange(2, 2, totalMembers, 1);
-  ss.setNamedRange('TOT_OVERALL', rangeOverallTot);
-
-  let rangeWeekly = sheet.getRange(2, 3, totalMembers, weeks.length);
-  ss.setNamedRange('TOT_WEEKLY', rangeWeekly);
-  
-  // CONDITIONAL FORMATTING
-  sheet.clearConditionalFormatRules(); 
-  sheet.setConditionalFormatRules([
-    SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied('=and(indirect(\"R[0]C[0]\",false)>0,indirect(\"R[0]C[0]\",false)=max(indirect(\"R2C[0]:R'+maxRows+'C[0]\",false)))')
-      .setBackground('#75F0A1')
-      .setBold(true)
-      .setRanges([rangeWeekly])
-      .build(),
-    SpreadsheetApp.newConditionalFormatRule()
-      .setGradientMaxpointWithValue("#75F0A1", SpreadsheetApp.InterpolationType.NUMBER, '=max(indirect("TOT_OVERALL"))') // Max value of all correct picks
-      .setGradientMidpointWithValue("#FFFFFF", SpreadsheetApp.InterpolationType.NUMBER, '=average(indirect("TOT_OVERALL"))') // Generates Median Value
-      .setGradientMinpointWithValue("#FF9B69", SpreadsheetApp.InterpolationType.NUMBER, '=min(indirect("TOT_OVERALL"))') // Min value of all correct picks
-      .setRanges([rangeOverallTot])
-      .build(),
-    SpreadsheetApp.newConditionalFormatRule()
-      .setGradientMaxpointWithValue("#75F0A1", SpreadsheetApp.InterpolationType.NUMBER, "15")
-      .setGradientMidpointWithValue("#FFFFFF", SpreadsheetApp.InterpolationType.NUMBER, "10")
-      .setGradientMinpointWithValue("#FF9B69", SpreadsheetApp.InterpolationType.NUMBER, "5")
-      .setRanges([rangeWeekly])
-      .build()
-  ]);
-  
-  overallPrimaryFormulas(sheet,totalMembers,maxCols,'sum',true);
-  overallMainFormulas(weeks,sheet,totalMembers,'TOT',true);
-  
-  return sheet;  
+  return { spec, specKey, members, totalMembers, entryRowStart, entryRowEnd, avgRow, rows, weeks, finalCol };
 }
 
-// RNK Sheet Creation / Adjustment
-function rnkSheet(ss,memberData) {
-  ss = fetchSpreadsheet(ss);
-  
-  let docProps;
-  if (!memberData) docProps = PropertiesService.getDocumentProperties();
-  memberData = memberData || JSON.parse(docProps.getProperty('members')) || {};
-  const memberNames = memberData.memberOrder.map(id => [memberData.members[id]?.name]);
-  const totalMembers = memberNames.length;
+// SIMPLE CONTENT — every write that puts data on a TOT/RNK/PCT sheet: the sheet itself, the grid
+// sizing, the header row labels, the member names, the named ranges and the two shared formula
+// helpers. Formatting is deliberately absent — that belongs to applySimpleFormatting, which runs
+// after this. The formula helpers are called with applyFormats false so that number formats have
+// exactly one owner; see the note on applySimpleFormatting.
+function writeSimpleContent(sheet,layout,ss) {
 
-  let sheetName = 'RNK';
-  let sheet = ss.getSheetByName(sheetName);
-  if (sheet == null) {
-    ss.insertSheet(sheetName);
-    sheet = ss.getSheetByName(sheetName);
-  }
+  const spec = layout.spec;
+  ss = fetchSpreadsheet(ss);
+  sheet = sheet || ss.getSheetByName(spec.sheetName) || ss.insertSheet(spec.sheetName);
+
   sheet.clear();
+  adjustRows(sheet,layout.rows);
+  adjustColumns(sheet,layout.finalCol);
+
+  sheet.getRange(1,1,1,2).setValues([[spec.cornerLabel,spec.totalLabel]]);
+  for (let a = 0; a < layout.weeks.length; a++) {
+    sheet.getRange(1,a+3).setValue(layout.weeks[a]);
+  }
+  if (spec.avgLabel) {
+    sheet.getRange(layout.avgRow,1).setValue(spec.avgLabel);
+  }
+  sheet.getRange(layout.entryRowStart,1,layout.totalMembers,1).setValues(layout.members);
+
+  // Named ranges always cover the member rows only, never the averages row
+  ss.setNamedRange(spec.namesRangeName,sheet.getRange(layout.entryRowStart,1,layout.totalMembers,1));
+  ss.setNamedRange(spec.overallRangeName,sheet.getRange(layout.entryRowStart,2,layout.totalMembers,1));
+  ss.setNamedRange(spec.weeklyRangeName,sheet.getRange(layout.entryRowStart,3,layout.totalMembers,layout.weeks.length));
+
+  overallPrimaryFormulas(sheet,layout.totalMembers,layout.finalCol,spec.primaryAction,spec.hasAvgRow,false);
+  overallMainFormulas(layout.weeks,sheet,layout.totalMembers,spec.rangePrefix,spec.hasAvgRow,false);
+
+  return sheet;
+}
+
+// SIMPLE FORMATTING — every colour, column width, alignment, number format, frozen pane and
+// conditional rule on a TOT/RNK/PCT sheet, and nothing that writes a cell value. Safe to re-run
+// over a populated sheet: it opens with clearFormat() rather than clear(), which matters more here
+// than on the weekly sheet because nothing else ever paints rows 2..n — sheet.clear() used to be
+// the only thing removing stale body formatting, and sheet.clear() now belongs to the write path.
+//
+// This function is the sole owner of the four number-format rectangles (members' overall column,
+// members' week grid, and on TOTAL/PCT the averages row's overall cell and week grid).
+// overallPrimaryFormulas/overallMainFormulas are told not to set formats from writeSimpleContent,
+// so the deploy path and allFormulasUpdate can no longer disagree about the same cells. mnfSheet
+// and allFormulasUpdate's MNF block still call those helpers without the flag, so MNF is unchanged.
+function applySimpleFormatting(sheet,layout) {
+
+  const spec = layout.spec;
+  const weekCount = layout.weeks.length;
+
+  // The only thing that removes stale formatting now that clear() belongs to the write path.
+  sheet.getRange(1,1,layout.rows,layout.finalCol).clearFormat();
+
   sheet.setTabColor(generalTabColor);
 
-  let rows = totalMembers + 1;
-  let maxRows = sheet.getMaxRows();
-  if (rows < maxRows) {
-    sheet.deleteRows(rows,maxRows-rows);
-  } else if (rows > maxRows){
-    sheet.insertRows(maxRows,rows-maxRows);
-  }
-  maxRows = sheet.getMaxRows();
-  let maxCols = sheet.getMaxColumns();
-  const weeks = Array.from({ length: WEEKS }, (_, index) => index + 1).filter(week => !WEEKS_TO_EXCLUDE.includes(week));
-  if ( weeks.length + 2 < maxCols ) {
-    sheet.deleteColumns(weeks.length + 2,maxCols-(weeks.length + 2));
-  }
-  maxCols = sheet.getMaxColumns();
-  sheet.getRange(1,1).setValue('RANKS');
-  sheet.getRange(1,2).setValue('AVERAGE');
+  sheet.getRange(1,1,layout.rows,layout.finalCol)
+    .setHorizontalAlignment('center')
+    .setVerticalAlignment('middle')
+    .setFontFamily('Montserrat')
+    .setFontSize(10);
+  sheet.getRange(1,1,layout.rows,1).setHorizontalAlignment('left');
 
-  for ( let a = 0; a < weeks.length; a++ ) {
-    sheet.getRange(1,a+3).setValue(weeks[a]);
-    sheet.setColumnWidth(a+3,48);
-  }
-    
-  let range = sheet.getRange(1,1,rows,maxCols);
-  range.setHorizontalAlignment('center');
-  range.setVerticalAlignment('middle');
-  range.setFontFamily("Montserrat");
-  range.setFontSize(10);
-  sheet.getRange(2,1,totalMembers,1).setValues(memberNames); 
-  sheet.getRange(1,1,totalMembers+1,1).setHorizontalAlignment('left');
   sheet.setColumnWidth(1,120);
   sheet.setColumnWidth(2,70);
-  
-  range = sheet.getRange(1,1,1,maxCols);
-  range.setBackground('black');
-  range.setFontColor('white');
-  
+  for (let a = 0; a < weekCount; a++) {
+    sheet.setColumnWidth(a+3,spec.weekColWidth);
+  }
+
+  sheet.getRange(1,1,1,layout.finalCol).setBackground('black').setFontColor('white');
+  if (layout.avgRow) {
+    sheet.getRange(layout.avgRow,1,1,layout.finalCol).setBackground('#e6e6e6');
+  }
+
+  sheet.getRange(layout.entryRowStart,2,layout.totalMembers,1).setNumberFormat(spec.overallFormat);
+  sheet.getRange(layout.entryRowStart,3,layout.totalMembers,weekCount).setNumberFormat(spec.weekFormat);
+  if (layout.avgRow) {
+    sheet.getRange(layout.avgRow,2).setNumberFormat(spec.avgOverallFormat);
+    sheet.getRange(layout.avgRow,3,1,weekCount).setNumberFormat(spec.avgWeekFormat);
+  }
+
   sheet.setFrozenColumns(2);
   sheet.setFrozenRows(1);
 
-  // SET OVERALL RANK NAMES Range
-  let rangeOverallTotRnkNames = sheet.getRange('R2C1:R'+rows+'C1');
-  ss.setNamedRange('TOT_OVERALL_RNK_NAMES',rangeOverallTotRnkNames);  
-  sheet.clearConditionalFormatRules(); 
-  // RANKS TOTAL GRADIENT RULE
-  let rangeOverallRankTot = sheet.getRange('R2C2:R'+rows+'C2');
-  ss.setNamedRange('TOT_OVERALL_RANK',rangeOverallRankTot);
-  let formatRuleOverallTot = SpreadsheetApp.newConditionalFormatRule()
-    .setGradientMaxpointWithValue("#FF9B69", SpreadsheetApp.InterpolationType.NUMBER, '=counta(indirect("MEMBERS"))')
-    .setGradientMidpointWithValue("#FFFFFF", SpreadsheetApp.InterpolationType.NUMBER, '=counta(indirect("MEMBERS"))/2')
-    .setGradientMinpointWithValue("#5EDCFF", SpreadsheetApp.InterpolationType.NUMBER, 1)
-    .setRanges([rangeOverallRankTot])
-    .build();
-  // RANKS SHEET GRADIENT RULE
-  range = sheet.getRange('R2C3:R'+rows+'C'+(weeks.length+2));
-  ss.setNamedRange('TOT_WEEKLY_RANK',range);
-  let formatRuleOverallWinner = SpreadsheetApp.newConditionalFormatRule()
-    .whenNumberEqualTo(1)
-    .setBackground('#00E1FF')
+  sheet.clearConditionalFormatRules();
+  sheet.setConditionalFormatRules(simpleConditionalRules(sheet,layout));
+
+  return sheet;
+}
+
+// The per-sheet conditional format rules, in the order the original builders installed them —
+// order decides which rule paints a cell, so it is preserved exactly.
+function simpleConditionalRules(sheet,layout) {
+
+  const spec = layout.spec;
+  const weekCount = layout.weeks.length;
+  const overallName = spec.overallRangeName;
+
+  // Member rows only — TOTAL and RNK stop their rules above the averages row.
+  const overallRange = sheet.getRange(layout.entryRowStart,2,layout.totalMembers,1);
+  const weeklyRange = sheet.getRange(layout.entryRowStart,3,layout.totalMembers,weekCount);
+  // PCT is the one sheet whose gradients run through the averages row too (rows 2..layout.rows).
+  const overallRangeWithAvg = sheet.getRange(layout.entryRowStart,2,layout.rows-1,1);
+  const weeklyRangeWithAvg = sheet.getRange(layout.entryRowStart,3,layout.rows-1,weekCount);
+
+  // Highlight the column leader: a positive cell equal to the maximum of its own column.
+  const columnLeader = range => SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(`=and(indirect("R[0]C[0]",false)>0,indirect("R[0]C[0]",false)=max(indirect("R${layout.entryRowStart}C[0]:R${layout.rows}C[0]",false)))`)
+    .setBackground('#75F0A1')
     .setBold(true)
     .setRanges([range])
     .build();
-  let formatRuleOverall = SpreadsheetApp.newConditionalFormatRule()
-    .setGradientMaxpointWithValue("#FF9B69", SpreadsheetApp.InterpolationType.NUMBER, '=counta(indirect("MEMBERS"))')
-    .setGradientMidpointWithValue("#FFFFFF", SpreadsheetApp.InterpolationType.NUMBER, '=counta(indirect("MEMBERS"))/2')
-    .setGradientMinpointWithValue("#5EDCFF", SpreadsheetApp.InterpolationType.NUMBER, 1)
+
+  // hi / mid / lo are [colour, value] pairs, matching setGradient*pointWithValue's argument order.
+  const gradient = (range,hi,mid,lo) => SpreadsheetApp.newConditionalFormatRule()
+    .setGradientMaxpointWithValue(hi[0],SpreadsheetApp.InterpolationType.NUMBER,hi[1])
+    .setGradientMidpointWithValue(mid[0],SpreadsheetApp.InterpolationType.NUMBER,mid[1])
+    .setGradientMinpointWithValue(lo[0],SpreadsheetApp.InterpolationType.NUMBER,lo[1])
     .setRanges([range])
     .build();
-  let formatRules = sheet.getConditionalFormatRules();
-  formatRules.push(formatRuleOverallWinner);
-  formatRules.push(formatRuleOverall);
-  formatRules.push(formatRuleOverallTot);
-  sheet.setConditionalFormatRules(formatRules);
-  
-  overallPrimaryFormulas(sheet,totalMembers,maxCols,'average',false);
-  overallMainFormulas(weeks,sheet,totalMembers,'RNK',false);
-  
-  return sheet;  
+
+  if (layout.specKey === 'RNK') {
+    // RNK inverts the gradient (rank 1 is best) and flags the weekly winner by value rather than
+    // by comparison against the column maximum.
+    const memberCount = '=counta(indirect("MEMBERS"))';
+    return [
+      SpreadsheetApp.newConditionalFormatRule()
+        .whenNumberEqualTo(1)
+        .setBackground('#00E1FF')
+        .setBold(true)
+        .setRanges([weeklyRange])
+        .build(),
+      gradient(weeklyRange,['#FF9B69',memberCount],['#FFFFFF',memberCount + '/2'],['#5EDCFF',1]),
+      gradient(overallRange,['#FF9B69',memberCount],['#FFFFFF',memberCount + '/2'],['#5EDCFF',1])
+    ];
+  }
+
+  if (layout.specKey === 'PCT') {
+    return [
+      columnLeader(weeklyRangeWithAvg),
+      gradient(weeklyRangeWithAvg,['#75F0A1','1'],['#FFFFFF','0.5'],['#FF9B69','0']),
+      gradient(overallRangeWithAvg,
+        ['#75F0A1',`=max(indirect("${overallName}"))`],
+        ['#FFFFFF',`=average(indirect("${overallName}"))`],
+        ['#FF9B69',`=min(indirect("${overallName}"))`])
+    ];
+  }
+
+  // TOT
+  return [
+    columnLeader(weeklyRange),
+    gradient(overallRange,
+      ['#75F0A1',`=max(indirect("${overallName}"))`],
+      ['#FFFFFF',`=average(indirect("${overallName}"))`],
+      ['#FF9B69',`=min(indirect("${overallName}"))`]),
+    gradient(weeklyRange,['#75F0A1','15'],['#FFFFFF','10'],['#FF9B69','5'])
+  ];
 }
 
-// PCT Sheet Creation / Adjustment
-function pctSheet(ss,memberData) {
+// Composition for all three sheets. The PropertiesService fallback lives here rather than in
+// computeSimpleLayout so that the layout stays a pure function of its arguments.
+function simpleSheet(specKey,ss,memberData) {
   ss = fetchSpreadsheet(ss);
 
-  let docProps;
-  if (!memberData) docProps = PropertiesService.getDocumentProperties();
-  memberData = memberData || JSON.parse(docProps.getProperty('members')) || {};
-  const memberNames = memberData.memberOrder.map(id => [memberData.members[id]?.name]);
-  const totalMembers = memberNames.length;
-
-  const sheetName = 'PCT';
-  const sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
-
-  sheet.clear();
-  sheet.setTabColor(generalTabColor);
-  
-  let rows = totalMembers+2; // 2 additional rows
-  let maxRows = sheet.getMaxRows();
-  if (rows < maxRows) {
-    sheet.deleteRows(rows,maxRows-rows);
-  } else if (rows > maxRows){
-    sheet.insertRows(maxRows,rows-maxRows);
+  if (!memberData) {
+    const docProps = PropertiesService.getDocumentProperties();
+    memberData = JSON.parse(docProps.getProperty('members')) || {};
   }
-  maxRows = sheet.getMaxRows();
-  let maxCols = sheet.getMaxColumns();
-  const weeks = Array.from({ length: WEEKS }, (_, index) => index + 1).filter(week => !WEEKS_TO_EXCLUDE.includes(week));
-  if ( weeks.length + 2 < maxCols ) {
-    sheet.deleteColumns(weeks.length + 2,maxCols-(weeks.length + 2));
+
+  const layout = computeSimpleLayout(specKey,memberData);
+  if (!layout) {
+    Logger.log(`❌ Unknown simple sheet spec '${specKey}' — nothing built.`);
+    return null;
   }
-  maxCols = sheet.getMaxColumns();
-  sheet.getRange(1,1,1,2).setValues([['PERCENTAGES','AVERAGE']]);
-  sheet.getRange(rows,1).setValue('AVERAGES');
-  
-  for ( let a = 0; a < weeks.length; a++ ) {
-    sheet.getRange(1,a+3).setValue(weeks[a]);
-    sheet.setColumnWidth(a+3,48);
+
+  let sheet = ss.getSheetByName(layout.spec.sheetName);
+  if (sheet == null) {
+    sheet = ss.insertSheet(layout.spec.sheetName);
   }
-  
-  let range = sheet.getRange(1,1,rows,maxCols);
-  range.setHorizontalAlignment('center').setVerticalAlignment('middle').setFontFamily("Montserrat").setFontSize(10);
-  sheet.getRange(2,1,totalMembers,1).setValues(memberNames); 
-  sheet.getRange(1,1,rows,1).setHorizontalAlignment('left');
-  sheet.setColumnWidth(1,120);
-  sheet.setColumnWidth(2,70);
-  
-  range = sheet.getRange(1,1,1,maxCols).setBackground('black').setFontColor('white');
-  sheet.getRange(rows,1,1,weeks.length+2).setBackground('#e6e6e6'); 
 
-  sheet.getRange(2,2,totalMembers+1,1).setNumberFormat("##.#%");  
-  sheet.setFrozenColumns(2);
-  sheet.setFrozenRows(1);
+  sheet = writeSimpleContent(sheet,layout,ss);
+  applySimpleFormatting(sheet,layout);
 
-  // SET OVERALL PCT NAMES Range
-  ss.setNamedRange('TOT_OVERALL_PCT_NAMES',sheet.getRange(`R2C1:R${rows-1}C1`));
-  ss.setNamedRange('TOT_OVERALL_PCT',sheet.getRange(`R2C2:R${rows-1}C2`));
-  ss.setNamedRange('TOT_WEEKLY_PCT',sheet.getRange(`R2C3:R${rows-1}C${weeks.length+2}`));
-  
-  // PCT SHEET GRADIENT RULE
-  sheet.clearConditionalFormatRules();
-  sheet.setConditionalFormatRules([
-    // Highlight column leader
-    SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(`=and(indirect("R[0]C[0]",false)>0,indirect("R[0]C[0]",false)=max(indirect("R2C[0]:R${maxRows}C[0]",false)))`)
-      .setBackground('#75F0A1')
-      .setBold(true)
-      .setRanges([sheet.getRange(`R2C3:R${rows}C${weeks.length+2}`)])
-      .build(),
-    // Weekly Averages Rule
-    SpreadsheetApp.newConditionalFormatRule()
-      .setGradientMaxpointWithValue("#75F0A1", SpreadsheetApp.InterpolationType.NUMBER, "1")
-      .setGradientMidpointWithValue("#FFFFFF", SpreadsheetApp.InterpolationType.NUMBER, "0.5")
-      .setGradientMinpointWithValue("#FF9B69", SpreadsheetApp.InterpolationType.NUMBER, "0")
-      .setRanges([sheet.getRange(`R2C3:R${rows}C${weeks.length+2}`)])
-      .build(),
-    // Averages Rule
-    SpreadsheetApp.newConditionalFormatRule()
-      .setGradientMaxpointWithValue("#75F0A1", SpreadsheetApp.InterpolationType.NUMBER, '=max(indirect("TOT_OVERALL_PCT"))') // Max value of all correct picks
-      .setGradientMidpointWithValue("#FFFFFF", SpreadsheetApp.InterpolationType.NUMBER, '=average(indirect("TOT_OVERALL_PCT"))') // Generates Median Value
-      .setGradientMinpointWithValue("#FF9B69", SpreadsheetApp.InterpolationType.NUMBER, '=min(indirect("TOT_OVERALL_PCT"))') // Min value of all correct picks  
-      .setRanges([sheet.getRange('R2C2:R'+rows+'C2')])
-      .build()
-  ]);
-
-  overallPrimaryFormulas(sheet,totalMembers,maxCols,'average',true);
-  overallMainFormulas(weeks,sheet,totalMembers,'PCT',true);
-
-  return sheet;  
+  return sheet;
 }
+
+// TOTAL Sheet Creation / Adjustment
+function totSheet(ss,memberData) { return simpleSheet('TOT',ss,memberData); }
+
+// RNK Sheet Creation / Adjustment
+function rnkSheet(ss,memberData) { return simpleSheet('RNK',ss,memberData); }
+
+// PCT Sheet Creation / Adjustment
+function pctSheet(ss,memberData) { return simpleSheet('PCT',ss,memberData); }
 
 // MNF Sheet Creation / Adjustment
 function mnfSheet(ss,memberData) {
@@ -9674,30 +9661,33 @@ function seasonSheet(ss, config, memberData) {
 }
 
 // TOT / RANK / PCT / MNF Combination formula for sum/average per player row
-function overallPrimaryFormulas(sheet,totalMembers,maxCols,action,avgRow) {
+// `applyFormats` (default true) decides whether this helper also owns the number format of the
+// cells it writes. TOT/RNK/PCT pass false: applySimpleFormatting owns those formats, and having
+// both set them meant the winner depended on call order (deploy vs allFormulasUpdate). mnfSheet
+// and allFormulasUpdate's MNF block omit the argument, so MNF keeps its original behaviour.
+function overallPrimaryFormulas(sheet,totalMembers,maxCols,action,avgRow,applyFormats = true) {
+  const isPct = sheet.getSheetName() == 'PCT';
+  const primary = sheet.getRange(2,2,totalMembers,1);
   if (action == 'average') {
-    sheet.getRange(2,2,totalMembers,1).setFormulaR1C1('=iferror(if(counta(R[0]C3:R[0]C'+maxCols+')=0,,average(R[0]C3:R[0]C'+maxCols+')))')
-      .setNumberFormat("#0.0");
+    primary.setFormulaR1C1('=iferror(if(counta(R[0]C3:R[0]C'+maxCols+')=0,,average(R[0]C3:R[0]C'+maxCols+')))');
+    if (applyFormats) primary.setNumberFormat("#0.0");
   } else if (action == 'sum') {
-    sheet.getRange(2,2,totalMembers,1).setFormulaR1C1('=iferror(if(counta(R[0]C3:R[0]C'+maxCols+')=0,,sum(R[0]C3:R[0]C'+maxCols+')))')
-      .setNumberFormat("##");
+    primary.setFormulaR1C1('=iferror(if(counta(R[0]C3:R[0]C'+maxCols+')=0,,sum(R[0]C3:R[0]C'+maxCols+')))');
+    if (applyFormats) primary.setNumberFormat("##");
   }
-  if (sheet.getSheetName() == 'PCT') {
-    sheet.getRange(2,2,totalMembers,1).setNumberFormat("##.#%");
+  if (applyFormats && isPct) {
+    primary.setNumberFormat("##.#%");
   }
   if (avgRow) {
-    if (sheet.getSheetName() == 'PCT'){  
-      sheet.getRange(sheet.getMaxRows(),2).setFormulaR1C1('=iferror(if(counta(R2C[0]:R'+(totalMembers+1)+'C[0])>=3,average(R2C[0]:R'+(totalMembers+1)+'C[0]),))')
-        .setNumberFormat('##.#%');
-    } else {
-      sheet.getRange(sheet.getMaxRows(),2).setFormulaR1C1('=iferror(if(counta(R2C[0]:R'+(totalMembers+1)+'C[0])>=3,average(R2C[0]:R'+(totalMembers+1)+'C[0]),))')
-        .setNumberFormat("#0.0");
-    }
+    const avgCell = sheet.getRange(sheet.getMaxRows(),2);
+    avgCell.setFormulaR1C1('=iferror(if(counta(R2C[0]:R'+(totalMembers+1)+'C[0])>=3,average(R2C[0]:R'+(totalMembers+1)+'C[0]),))');
+    if (applyFormats) avgCell.setNumberFormat(isPct ? '##.#%' : "#0.0");
   }
 }
 
 // TOT / RNK / PCT / MNF Combination formula for each column (week)
-function overallMainFormulas(weeks,sheet,totalMembers,str,avgRow) {
+// See overallPrimaryFormulas for what `applyFormats` is for.
+function overallMainFormulas(weeks,sheet,totalMembers,str,avgRow,applyFormats = true) {
   weeks = weeks || Array.from({ length: WEEKS }, (_, index) => index + 1).filter(week => !WEEKS_TO_EXCLUDE.includes(week));
   
   for (let a = 0; a < weeks.length; a++) {
@@ -9719,10 +9709,8 @@ function overallMainFormulas(weeks,sheet,totalMembers,str,avgRow) {
         );
       }
 
-      if (sheet.getSheetName() === 'PCT') {
-        cell.setNumberFormat("##.#%");
-      } else {
-        cell.setNumberFormat("#0");
+      if (applyFormats) {
+        cell.setNumberFormat(sheet.getSheetName() === 'PCT' ? "##.#%" : "#0");
       }
     }
   }
@@ -9741,19 +9729,20 @@ function overallMainFormulas(weeks,sheet,totalMembers,str,avgRow) {
       }
       for (let a = 0; a < weeks.length; a++){
         let rows = sheet.getMaxRows();
+        const avgCell = sheet.getRange(rows,a+3);
         if (mondayNightGames[a] > 1) {
-          sheet.getRange(rows,a+3).setFormulaR1C1('=iferror(if(counta(R2C[0]:R'+(totalMembers+1)+'C[0])>=3,average(R2C[0]:R'+(totalMembers+1)+'C[0])/'+mondayNightGames[a]+',))')
-            .setNumberFormat("##%");
+          avgCell.setFormulaR1C1('=iferror(if(counta(R2C[0]:R'+(totalMembers+1)+'C[0])>=3,average(R2C[0]:R'+(totalMembers+1)+'C[0])/'+mondayNightGames[a]+',))');
         } else {
-          sheet.getRange(rows,a+3).setFormulaR1C1('=iferror(if(counta(R2C[0]:R'+(totalMembers+1)+'C[0])>=3,average(R2C[0]:R'+(totalMembers+1)+'C[0]),))')
-            .setNumberFormat("##%");
+          avgCell.setFormulaR1C1('=iferror(if(counta(R2C[0]:R'+(totalMembers+1)+'C[0])>=3,average(R2C[0]:R'+(totalMembers+1)+'C[0]),))');
         }
+        if (applyFormats) avgCell.setNumberFormat("##%");
       }
     } else {
       for (let a = 0; a < weeks.length; a++){
         let rows = sheet.getMaxRows();
-        sheet.getRange(rows,a+3).setFormulaR1C1('=iferror(if(counta(R2C[0]:R'+(totalMembers+1)+'C[0])>=3,average(R2C[0]:R'+(totalMembers+1)+'C[0]),))')
-          .setNumberFormat("##%");
+        const avgCell = sheet.getRange(rows,a+3);
+        avgCell.setFormulaR1C1('=iferror(if(counta(R2C[0]:R'+(totalMembers+1)+'C[0])>=3,average(R2C[0]:R'+(totalMembers+1)+'C[0]),))');
+        if (applyFormats) avgCell.setNumberFormat("##%");
       }
     }
   }
@@ -9780,20 +9769,22 @@ function allFormulasUpdate(ss){
   const weeks = Array.from({ length: WEEKS }, (_, index) => index + 1).filter(week => !WEEKS_TO_EXCLUDE.includes(week));
 
   if (config.pickemsInclude) {
+    // TOT / RNK / PCT pass applyFormats false: applySimpleFormatting owns their number formats, so
+    // refreshing formulas here must not repaint them. MNF below keeps the original behaviour.
     sheet = ss.getSheetByName('TOTAL');
     maxCols = sheet.getMaxColumns();
-    overallPrimaryFormulas(sheet,totalMembers,maxCols,'sum',true);
-    overallMainFormulas(weeks,sheet,totalMembers,'TOT',true);
+    overallPrimaryFormulas(sheet,totalMembers,maxCols,'sum',true,false);
+    overallMainFormulas(weeks,sheet,totalMembers,'TOT',true,false);
 
     sheet = ss.getSheetByName('RNK');
     maxCols = sheet.getMaxColumns();
-    overallPrimaryFormulas(sheet,totalMembers,maxCols,'average',false);
-    overallMainFormulas(weeks,sheet,totalMembers,'RNK',false);
+    overallPrimaryFormulas(sheet,totalMembers,maxCols,'average',false,false);
+    overallMainFormulas(weeks,sheet,totalMembers,'RNK',false,false);
   
     sheet = ss.getSheetByName('PCT');
     maxCols = sheet.getMaxColumns();
-    overallPrimaryFormulas(sheet,totalMembers,maxCols,'average',true);
-    overallMainFormulas(weeks,sheet,totalMembers,'PCT',true);
+    overallPrimaryFormulas(sheet,totalMembers,maxCols,'average',true,false);
+    overallMainFormulas(weeks,sheet,totalMembers,'PCT',true,false);
     
     if (!config.mnfExclude) {
       sheet = ss.getSheetByName('MNF');
