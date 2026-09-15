@@ -10880,12 +10880,18 @@ function applyWeeklyFormatting(sheet,layout) {
 
   if (!layout.config.bonusInclude) {
     sheet.hideRows(layout.bonusRow);
+  } else {
+    sheet.showRows(layout.bonusRow);
   }
 
   if (!layout.isAts) {
     sheet.hideRows(layout.spreadRow);
     sheet.hideRows(layout.outcomeMarginRow);
     sheet.hideRows(layout.spreadOutcomeRow);
+  } else {
+    sheet.showRows(layout.spreadRow);
+    sheet.showRows(layout.outcomeMarginRow);
+    sheet.showRows(layout.spreadOutcomeRow);
   }
 
   sheet.setRowHeight(layout.summaryRow,40);
