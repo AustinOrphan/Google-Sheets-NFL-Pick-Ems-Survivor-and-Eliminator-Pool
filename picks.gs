@@ -2792,7 +2792,7 @@ function fetchLatestSpreadsForWeek(headless, targetWeek) {
       // If a specific week is provided, use it directly
       weekToUpdate = targetWeek;
       if (!headless) ss.toast(`Checking for data in Week ${weekToUpdate}...`, `🎯 Targeting Week ${weekToUpdate}`);
-      const response = UrlFetchApp.fetch(`${SCOREBOARD}?week=${weekToUpdate}`);
+      const response = UrlFetchApp.fetch(fetchScoreboardEndpoint(weekToUpdate));
       dataToProcess = JSON.parse(response.getContentText());
       year = dataToProcess.season.year;
     } else {
@@ -2800,7 +2800,8 @@ function fetchLatestSpreadsForWeek(headless, targetWeek) {
       const initialResponse = UrlFetchApp.fetch(SCOREBOARD);
       dataToProcess = JSON.parse(initialResponse.getContentText());
       
-      let currentWeek = dataToProcess.week.number;
+      // week.number is relative to the seasontype, so postseason weeks come back as 1-5
+      let currentWeek = dataToProcess.week.number + (dataToProcess.season.type === 3 ? REGULAR_SEASON : 0);
       weekToUpdate = currentWeek;
       year = dataToProcess.season.year;
 
@@ -2810,7 +2811,7 @@ function fetchLatestSpreadsForWeek(headless, targetWeek) {
       if (allGamesCompleted) {
         if (!headless) ss.toast(`Week ${currentWeek} is complete. Targeting next week...`, `⏩ Week ${currentWeek + 1}`);
         weekToUpdate = currentWeek + 1;
-        const nextWeekResponse = UrlFetchApp.fetch(`${SCOREBOARD}?week=${weekToUpdate}`);
+        const nextWeekResponse = UrlFetchApp.fetch(fetchScoreboardEndpoint(weekToUpdate));
         dataToProcess = JSON.parse(nextWeekResponse.getContentText());
       }
     }
