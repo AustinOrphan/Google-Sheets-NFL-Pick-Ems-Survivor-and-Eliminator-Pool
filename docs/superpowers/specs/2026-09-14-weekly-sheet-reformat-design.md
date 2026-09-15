@@ -394,6 +394,33 @@ Deliberately out of scope for phase 1, recorded so the design leaves room:
   default is the destructive one — the tool's job is "make this match the generated
   output" — but the `clearFormat()` call is a single line, so a per-run toggle stays cheap
   to add later.
+- **`diffCount` is 0 for a single-member grid.** Fixed during phase 1 (the cohesion column is
+  omitted when there is nobody to compare against), but the underlying expression at
+  picks.gs:9886 is unchanged. Revisit if the cohesion feature is reworked.
+- **Two sources for one ATS concept.** The Chances column's tooltip reads
+  `config.pickemsAts` while the layout's `isAts` comes from `forms[week].gamePlan.pickemsAts`.
+  If those disagree, the tooltip describes behaviour the sheet is not performing. Ported
+  verbatim rather than unified inside a refactor.
+- **Tiebreaker validation bounds disagree with its help text.** The rule enforces
+  `requireNumberBetween(0, 150)`; the help text says "between 0 and 120". Which is correct is a
+  pool-rules decision, so both were carried over unchanged.
+- **TOTAL's averages row is unlabelled.** `totSheet` writes `'AVERAGES'` into A2, which the
+  member-name block then overwrites. Pre-existing and cosmetic; a one-word fix via a spec
+  `avgLabel`, deliberately left out of the phase-1 refactor.
+- **`Logger.log(teamData)` runs 32 times per weekly build.** Commit `d1c930c` removed the twin
+  of this line from `leaderboardSheet` but never scoped the `weeklySheet` copy. Noise, not a
+  defect.
+- **Update Formulas no longer repairs TOT/RNK/PCT number formats.** Those belong to
+  `applySimpleFormatting` now, on a one-owner-per-concern principle. Deploy / Refresh still
+  rebuilds them completely.
+- **The first member-adding import after deploying still clears one week's paid ticks.** The
+  preservation depends on a `PAID_{week}` named range that does not exist on sheets built
+  before this change; it is created on that first rebuild. Recovering it would mean guessing
+  the old paid column, which risks marking the wrong people paid.
+- **75 unguarded `JSON.parse(docProps.getProperty(...))` sites remain.** Only
+  `reformatWeeklySheet` and the two panel entry points were hardened, because only they carry
+  a never-throw contract. The rest are house style.
+
 - **Phase 2/3 sheets** in the panel. Once the other builders are split, the same panel can
   list non-weekly sheets alongside the weeks.
 
