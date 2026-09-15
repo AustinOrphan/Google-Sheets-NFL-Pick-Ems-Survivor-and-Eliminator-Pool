@@ -19,6 +19,7 @@
 - **The gate is a heuristic backstop, not a proof.** Regex-based static analysis of JavaScript cannot be exhaustive — dynamic dispatch, `eval`, and callbacks through variables can evade it. The authoritative verification is the manual canary checks in Task 8: a ticked paid checkbox and a hand-entered spread value must both survive a reformat. Do not let a green gate substitute for running those.
 - **`clearFormat` is required**, not optional: every `apply*Formatting` opens with it. It is the only thing that removes stale formatting once `clear()` is gone.
 - **Formulas are out of scope for the reformat path.** They belong to `writeContent` and `allFormulasUpdate`.
+- **All data validation belongs to `applyFormatting`, without exception.** Validation rules are formatting, and a reformat must be able to repair one a user has cleared. If a rule's construction needs a value, compute that value in `computeLayout` and carry it on the layout — do not leave the rule on the write path.
 - **Preserve every existing signature.** `weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild)` has one caller (picks.gs:5435). `totSheet`/`rnkSheet`/`pctSheet` take `(ss, memberData)` and have three callers each — `setupSheets` (picks.gs:1150/1154/1158), their own `deploy*` wrapper (picks.gs:7131/7138/7145), and the dependency guard in `deployLeaderboardSheet` (picks.gs:7202-7204).
 - **Apps Script cannot run locally.** Only the pure layer is unit-testable. Every step that touches `SpreadsheetApp` is verified manually in a *copy* of the spreadsheet, never the live pool.
 - **Never test against the live pool.** Make a copy via File → Make a copy before any manual step.
@@ -929,20 +930,6 @@ Expected: no output.
 
 The pattern is deliberately narrow — a conditional-format *formula string* at picks.gs:10540 contains `columns(indirect(...))`, which a looser grep would match.
 
-- [ ] **Step 8b: MANUAL — confirm the day-coloration fix**
-
-The two defects folded in from Task 3 cannot be seen by any local test — they only manifest as
-conditional-format rules in the spreadsheet.
-
-1. In a **copy**, open a populated `WK` sheet → Format → Conditional formatting.
-2. Record the rule count and whether any rule targets the sub-header of a *non-final* matchup
-   column. Before the fix, none do — every day rule points at the last matchup column.
-3. Paste the updated `picks.gs`, run `weeklySheet(null, 5)`.
-4. Reopen the conditional-formatting sidebar. Confirm there is now one sub-header rule **per
-   matchup column**, not N rules stacked on the final one.
-5. Enter a winner in the outcome row for an early-week game and confirm *that* game's
-   sub-header cell fills with its day colour — previously only the last column responded.
-
 - [ ] **Step 9: Run the tests and syntax check**
 
 Run: `npm test && cp picks.gs /tmp/p.js && node --check /tmp/p.js && echo SYNTAX_OK`
@@ -1051,6 +1038,21 @@ Expected: a call passing `(ss, week, config, formsData, memberData, displayEmpty
 4. Run `weeklySheet(null, 5)` from the editor.
 5. Confirm: the sheet is recreated; row 1 shows all matchup headers; day colours differ across the sub-header row (this is the Task 3 fix — before it, only the last column changed); the bottom block shows Spread / Winner / Margin / ATS Winner / Bonus; the paid column shows checkboxes.
 6. Confirm no `Those columns are out of bounds` error — that is the Task 4 Delta 1 fix, and it was previously swallowed by the try/catch at picks.gs:5415.
+
+- [ ] **Step 4b: MANUAL — confirm the day-coloration fix**
+
+The two defects folded in from Task 3 cannot be seen by any local test — they only manifest as
+conditional-format rules in the spreadsheet.
+
+1. In a **copy**, open a populated `WK` sheet → Format → Conditional formatting.
+2. Record the rule count and whether any rule targets the sub-header of a *non-final* matchup
+   column. Before the fix, none do — every day rule points at the last matchup column.
+3. Paste the updated `picks.gs`, run `weeklySheet(null, 5)`. This only becomes observable
+   now, in Task 6 — until `weeklySheet` was rewired it still executed the original body.
+4. Reopen the conditional-formatting sidebar. Confirm there is now one sub-header rule **per
+   matchup column**, not N rules stacked on the final one.
+5. Enter a winner in the outcome row for an early-week game and confirm *that* game's
+   sub-header cell fills with its day colour — previously only the last column responded.
 
 - [ ] **Step 5: MANUAL — the import rebuild path still works**
 
