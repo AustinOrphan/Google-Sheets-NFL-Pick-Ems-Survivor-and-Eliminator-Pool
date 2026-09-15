@@ -1329,9 +1329,19 @@ function compareWeeklyLayout(layout, sheetShape) {
 }
 ```
 
-The roster comparison matters: without it, the row-count check is a tautology, because
-`verifyWeeklyLayout` feeds the sheet's own names into `computeWeeklyLayout` and then compares
-the result against those same names.
+**What actually makes this interlock non-tautological.** `verifyWeeklyLayout` feeds the
+sheet's own names into `computeWeeklyLayout`, so `layout.members` is *derived from*
+`namesValues` and the roster comparison can never fail from that caller. The checks that carry
+real weight are the ones reading the sheet independently: `getMaxRows()`, `getMaxColumns()`,
+the row-1 header read, and `namesRange.getRow()`. Those are what catch schedule drift and a
+grid that no longer matches.
+
+Keep the roster loop anyway — it is part of `compareWeeklyLayout`'s contract, which is tested
+directly with independent inputs — but do not mistake it for the safeguard.
+
+And note what this interlock deliberately does NOT police: roster freshness. A sheet showing
+eight members when the pool has ten is simply out of date, and reformatting it correctly
+formats what is there. Adding members is the import path's job, not a reformat's.
 
 - [ ] **Step 4: Run to verify they pass**
 
@@ -1392,7 +1402,7 @@ function verifyWeeklyLayout(week, config, forms, memberData, ss) {
 - [ ] **Step 6: Run tests and gate**
 
 Run: `npm test && npm run gate`
-Expected: `0 failed`, then `banned-api gate: clean (1 entry point(s))`.
+Expected: `0 failed`, then `banned-api gate: clean (2 entry point(s))` — two, because `computeWeeklyLayout` was registered as a `pure` entry during Task 2.
 
 - [ ] **Step 7: Commit**
 
