@@ -1055,21 +1055,23 @@ conditional-format rules in the spreadsheet.
 2. Record the rule count and whether any rule targets the sub-header of a *non-final* matchup
    column. Before the fix, none do — every day rule points at the last matchup column.
 
-   **Test the larger hypothesis while you are here.** The original pushed a *builder* into
-   `formatRules` instead of a built rule, and `setConditionalFormatRules` rejects builders. That
-   call sits at picks.gs:11835, with 28 static-formatting calls AND the data restore after it,
-   all inside the try/catch at picks.gs:5415 that only toasts. So the original may have been
-   throwing there and losing **every** conditional format plus all static formatting on each
-   build — not merely the day colours. Check the execution log (Apps Script → Executions) for a
-   swallowed error on a pre-fix run, and note whether the sheet is missing row heights, frozen
-   panes, merges or column widths as well. If so, this bug is the likely root cause of the
-   original complaint and the visible improvement after rewiring will be dramatic.
-3. Paste the updated `picks.gs`, run `weeklySheet(null, 5)`. This only becomes observable
-   now, in Task 6 — until `weeklySheet` was rewired it still executed the original body.
-4. Reopen the conditional-formatting sidebar. Confirm there is now one sub-header rule **per
-   matchup column**, not N rules stacked on the final one.
-5. Enter a winner in the outcome row for an early-week game and confirm *that* game's
-   sub-header cell fills with its day colour — previously only the last column responded.
+   **A hypothesis that was considered and rejected.** The original pushed a conditional-format
+   *builder* into `formatRules` instead of a built rule, and `setConditionalFormatRules` — which
+   sits with 55 sheet-mutating statements plus the data restore after it, inside a catch that
+   only toasts — would reject a builder. That suggested weekly sheets might have been losing all
+   formatting on every build.
+
+   **Git history refutes it.** The builder push is present in the repo's first commit
+   (`8088d09`, 2025-09-04) and survived unchanged through 2026-09-10 — a year of active,
+   iterative development on this exact sheet. `weeklySheet` is only ever called from the import
+   path. Had that call thrown, every import would have lost all picks, widths, frozen panes and
+   tab colours and fired a red `❗ PICK 'EMS FAILED` toast. That cannot have gone unnoticed for a
+   season.
+
+   So Apps Script evidently tolerates the builder, and the real defect is narrower: the day
+   rules all targeted the final matchup column. Confirm by checking Apps Script → Executions for
+   a historical swallowed error. Expect the visible change to be "day colours now vary per
+   column", not a dramatic restoration.
 
 - [ ] **Step 5: MANUAL — the import rebuild path still works**
 

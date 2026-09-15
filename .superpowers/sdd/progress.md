@@ -120,7 +120,7 @@ Task 5: COMPLETE (commits f9f79d9..279cc93, review APPROVED - no Critical/Import
   Confirmed setBorder judgment call correct (writeWeeklyContent has 0 setBorder; clearFormat
   erases borders, so leaving it would have dropped every row border at Task 6).
 
-  *** MAJOR HYPOTHESIS for Task 6 manual check ***
+  *** HYPOTHESIS RAISED THEN REFUTED - see correction below ***
   Original pushed a BUILDER into formatRules; setConditionalFormatRules rejects builders.
   That call is at picks.gs:11835 with 28 static-formatting calls AND the data restore after
   it, all inside the try/catch at 5415 that only toasts. So the original may have been
@@ -168,3 +168,23 @@ Task 6: COMPLETE (commit 17f108e, first pass). weeklySheet 1033 -> 59 lines;
        unexamined - this task's deletion is what makes either mistake permanent.
     C3 getExistingWeeklySheetData now receives the real `forms` - strictly more correct, but a
        live behaviour change on the rebuild path exercised only by manual Step 5.
+
+CORRECTION (Task 6 review): the full-formatting-loss hypothesis was OVERSTATED by the
+  controller. Source facts hold (builder pushed; 55 statements + data restore after the call;
+  caller only toasts). But the reviewer ran the decisive check: the builder push dates to the
+  repo's FIRST commit 8088d09 (2025-09-04) and survived to 2026-09-10. weeklySheet is called
+  only from the import path; a throw would have lost every import's picks and shown a red
+  toast, for a whole season. Apps Script evidently TOLERATES the builder. Real defect is the
+  narrower one: day rules all targeted the final matchup column. Plan text corrected.
+  Lesson: check how long a suspected bug has survived before calling it a root cause.
+
+Task 6: COMPLETE (commits 17f108e..c9f75dc, review APPROVED - no Critical)
+  weeklySheet 1033 -> 59 lines (32 insertions / 1008 deletions). Reviewer proved completeness
+  4 ways incl. method-name multiset: ZERO methods present in old and absent in new - the check
+  that would have caught the earlier stranded setBorder.
+  13 statements legitimately preserved. The zero-member guard is the important one: my brief
+  wrongly said `if (!layout) return null` covers it; computeWeeklyLayout returns a DEGENERATE
+  OBJECT (totalMembers 0, entryRowEnd < entryRowStart). Implementer kept the guard. Plan fixed.
+  clearFormat rectangle carry-forward RESOLVED: adjustRows/adjustColumns resize to exactly the
+  target and applyWeeklyFormatting has one caller, always right after writeWeeklyContent.
+  Minor: ledger said 13 setNote, actual is 12.
