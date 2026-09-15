@@ -63,7 +63,34 @@ const BANNED = [
   ['adjustRows',       /\badjustRows\s*\(/],
   ['adjustColumns',    /\badjustColumns\s*\(/],
   ['setNamedRange',    /\.setNamedRange\s*\(/],
+  ['check',             /\.check\s*\(/],
+  ['uncheck',           /\.uncheck\s*\(/],
+  ['removeCheckboxes',  /\.removeCheckboxes\s*\(/],
+  ['setRichTextValue',  /\.setRichTextValue\s*\(/],
+  ['setRichTextValues', /\.setRichTextValues\s*\(/],
+  ['copyTo',            /\.copyTo\s*\(/],
+  ['moveTo',            /\.moveTo\s*\(/],
+  ['sort',              /\.sort\s*\(/],
+  ['randomizeRange',    /\.randomizeRange\s*\(/],
+  ['removeDuplicates',  /\.removeDuplicates\s*\(/],
+  ['trimWhitespace',    /\.trimWhitespace\s*\(/],
+  ['deleteRows',        /\.deleteRows\s*\(/],
+  ['deleteColumns',     /\.deleteColumns\s*\(/],
+  ['insertColumnsAfter', /\.insertColumnsAfter\s*\(/],
+  ['insertRowsAfter',   /\.insertRowsAfter\s*\(/],
 ];
+
+// mergeAcross() is intentionally NOT banned above even though it is
+// value-destroying in general (it silently discards every value in a merged
+// range but the top-left cell). It is used three times inside
+// applyWeeklyFormatting, each immediately preceded by a breakApart() call on
+// the exact same range, and all three sites are generated label/header
+// territory (subheader "chances" label, spread-to-bonus row labels, diff
+// column header) that holds no user data. A clean gate result does NOT mean
+// nothing in the scanned call graph can change a value - it means nothing on
+// this BANNED list appears there. mergeAcross is the one deliberate,
+// reviewed exception; do not assume other unlisted methods are similarly
+// safe without the same scrutiny.
 
 const REQUIRED = [['clearFormat', /\.clearFormat\s*\(/]];
 
