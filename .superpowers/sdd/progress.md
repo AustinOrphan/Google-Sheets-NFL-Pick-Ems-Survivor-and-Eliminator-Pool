@@ -201,3 +201,12 @@ Task 7: COMPLETE (commits 38a55c7..30a6cb5, 2 fix passes, review APPROVED)
     cannot fire live, the blank-row scan is the SOLE live defense. Test rewritten to mirror the
     real derivation; isolation proven by re-deleting the block and watching it fail.
   Also: 3 reason codes gained the remedy text the other 5 had; 1 no-op duplicate test removed.
+Task 8: COMPLETE (commits 3ff9afe..6089c5c, 1 fix pass, review APPROVED)
+  reformatWeeklySheet: 26 lines, 3 return paths, zero banned calls, never throws.
+  Fix: parameter-defaulting JSON.parse sat OUTSIDE the try/catch, so a corrupt document
+  property threw a raw SyntaxError out of a function contracted never to throw - and the
+  Task 9 panel loops it across ~18 weeks, so one corrupt property would abort the whole run.
+  Reproduced before/after. The same unguarded pattern exists 75x in picks.gs as house style;
+  deliberately NOT fixed elsewhere - only this function carries a never-throw contract.
+  Manual canaries (paid checkbox + hand-entered spread survive a reformat) remain PENDING -
+  they are the authoritative check and cannot run locally.
