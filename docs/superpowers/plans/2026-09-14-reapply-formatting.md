@@ -372,9 +372,7 @@ git commit -m "test: add Node harness and banned-API gate for picks.gs
 The harness loads picks.gs under chainable Proxy stubs and appends a
 source-scanned export shim, so const declarations escape the indirect eval
 and not-yet-written functions do not break the shim. This makes the pure
-layout layer unit-testable for the first time.
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
+layout layer unit-testable for the first time."
 ```
 
 ---
@@ -676,9 +674,7 @@ observed), unit-tested in Node. Adds matchupDescriptors so formatting can be
 keyed by matchup identity rather than position, and collects notes and outcome
 validations as data to be applied after grid sizing.
 
-Also guards the unguarded forms[week].gamePlan dereference at picks.gs:9817.
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
+Also guards the unguarded forms[week].gamePlan dereference at picks.gs:9817."
 ```
 
 ---
@@ -790,9 +786,7 @@ git commit -m "refactor: extract writeWeeklyContent from weeklySheet
 Owns values, formulas, named ranges and grid sizing. Fixes the adjustColumns
 ordering regression from 9db3bd3 by sizing rows and columns together before any
 write, and splits the fused paid chain so insertCheckboxes stays on the write
-path. Registers the paid summary formula with allFormulasUpdate.
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
+path. Registers the paid summary formula with allFormulasUpdate."
 ```
 
 ---
@@ -947,9 +941,7 @@ merges before re-merging, and re-asserts checkbox validation rather than calling
 insertCheckboxes, which would reset paid status. Day colours are driven from
 matchupDescriptors instead of a positional array, which fixes two defects: the
 per-day rules all targeted the final matchup column because picks.gs:9951 used a
-loop invariant, and picks.gs:9957 pushed a builder instead of the built rule.
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
+loop invariant, and picks.gs:9957 pushed a builder instead of the built rule."
 ```
 
 ---
@@ -1086,9 +1078,7 @@ git commit -m "refactor: recompose weeklySheet from the three extracted function
 weeklySheet drops from 1033 lines to a ~40-line composition of
 computeWeeklyLayout, writeWeeklyContent and applyWeeklyFormatting. Signature
 and behaviour unchanged for its one caller at picks.gs:5435. Also fixes the
-\$(text) template literal in the success log.
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
+\$(text) template literal in the success log."
 ```
 
 ---
@@ -1414,9 +1404,7 @@ Factors the comparison into a pure compareWeeklyLayout so it is unit-testable,
 with verifyWeeklyLayout doing the sheet reads. Uses a strict all-or-nothing
 header comparison rather than outcomeDataValidationMapping, which fails
 partially open. Rejects blank rows inside NAMES rather than filtering them, and
-compares the roster so the row-count check is not a tautology.
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
+compares the roster so the row-count check is not a tautology."
 ```
 
 ---
@@ -1529,9 +1517,7 @@ git commit -m "feat: add reformatWeeklySheet
 
 Thin wrapper over verifyWeeklyLayout and applyWeeklyFormatting. Aborts with a
 status rather than guessing, and never clears, writes, resizes, or re-points a
-named range.
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
+named range."
 ```
 
 ---
@@ -1827,9 +1813,7 @@ git commit -m "feat: add reapply-formatting selection panel
 Lists candidate weeks with the same verify status the reformat will use, so
 unreformattable weeks show their reason and remedy before the run. Candidates
 are the union of weeks with form data and weeks with a WK sheet, so no-sheet and
-no-form-data actually render. Tab colour is applied once after the loop.
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
+no-form-data actually render. Tab colour is applied once after the loop."
 ```
 
 ---
@@ -1879,9 +1863,7 @@ Reload the copy. Confirm `🏈 Picks → 🧰 Utilities → 🎨 Reapply Formatt
 
 ```bash
 git add picks.gs
-git commit -m "feat: add Reapply Formatting to the Utilities menu
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
+git commit -m "feat: add Reapply Formatting to the Utilities menu"
 ```
 
 ---
@@ -1984,9 +1966,7 @@ keeping their (ss, memberData) signatures for all three call sites each. Moves
 number-format ownership out of overallPrimaryFormulas/overallMainFormulas into
 applySimpleFormatting so allFormulasUpdate and the format path stop fighting
 over the same cells, and deletes the dead setNumberFormat calls at picks.gs:7292
-and 7482. MNF keeps its existing path.
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
+and 7482. MNF keeps its existing path."
 ```
 
 ---
@@ -2079,9 +2059,7 @@ tiebreakers, comments, outcomes, margins and spreads but never paid status,
 while insertCheckboxes resets every cell to false. Every member-expansion
 rebuild triggered at picks.gs:5435 therefore wiped every paid checkbox. Paid is
 now scraped and restored by member name, so it survives the remap that is the
-reason the rebuild runs.
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
+reason the rebuild runs."
 ```
 
 ---
@@ -2129,9 +2107,7 @@ Append to the spec's *Future extensions* section:
 
 ```bash
 git add docs/
-git commit -m "docs: record phase-1 follow-ups in the reformat spec
-
-Claude-Session: https://claude.ai/code/session_01P76i1kWH1y4tdUcgjdD8N8"
+git commit -m "docs: record phase-1 follow-ups in the reformat spec"
 ```
 
 Then use superpowers:finishing-a-development-branch to decide how `feat/reapply-formatting` lands.
