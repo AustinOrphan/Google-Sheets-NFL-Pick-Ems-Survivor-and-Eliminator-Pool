@@ -10966,6 +10966,147 @@ function applyWeeklyFormatting(sheet,layout) {
   }
 }
 
+// HEADER NORMALIZATION - Header cells are written as `AWAY\n@HOME`; a user or a paste can turn
+// the newline into a space (or leave stray padding), so compare on a normalized form rather than
+// on the raw cell text. Deliberately collapses whitespace only — it never lowercases or strips
+// punctuation, so 'KC @BUF' and 'BUF @KC' stay distinct.
+function normalizeHeader(v) {
+  if (v === null || v === undefined) return '';
+  return String(v).replace(/\s+/g, ' ').trim();
+}
+
+// LAYOUT COMPARISON - Pure comparison of a computed layout against the observed shape of a sheet.
+// Returns a status; never throws, never touches SpreadsheetApp, so it is unit-testable in Node.
+// `sheetShape` is { sheetExists, maxRows, maxCols, headerRow, namesExists, namesStartRow,
+// namesNumRows, namesValues }. It is NOT called `observed` — that name already belongs to
+// computeWeeklyLayout's fifth argument and means { displayEmpty, memberNames }.
+// Reasons returned: 'ready' | 'no-sheet' | 'row-mismatch' | 'col-mismatch' | 'drift' |
+// 'names-mismatch'. Missing checkbox validation is deliberately NOT a reason — requireCheckbox()
+// cannot alter cell contents, so applyWeeklyFormatting repairs a stripped paid column in place.
+function compareWeeklyLayout(layout, sheetShape) {
+  const wk = layout.week;
+  const bail = (reason, detail) => ({ ok: false, reason: reason, detail: detail });
+
+  if (!sheetShape.sheetExists) {
+    return bail('no-sheet', `No ${weeklySheetPrefix}${wk} sheet exists.`);
+  }
+  if (!sheetShape.namesExists) {
+    return bail('names-mismatch',
+      `NAMES_${wk} named range is missing. Run Check & Import Responses to rebuild the grid.`);
+  }
+  if (sheetShape.maxRows !== layout.rows) {
+    return bail('row-mismatch',
+      `Week ${wk} has ${sheetShape.maxRows} rows but the layout expects ${layout.rows}. ` +
+      `Use Deploy / Refresh to rebuild instead.`);
+  }
+  if (sheetShape.maxCols !== layout.finalCol) {
+    return bail('col-mismatch',
+      `Week ${wk} has ${sheetShape.maxCols} columns but the layout expects ${layout.finalCol}. ` +
+      `Use Deploy / Refresh to rebuild instead.`);
+  }
+
+  // Strict, all-or-nothing header comparison. Deliberately NOT outcomeDataValidationMapping,
+  // which fails partially open: it skips mismatches with a bare Logger.log and still returns a
+  // truthy, incomplete map. Any single differing header fails the whole check here.
+  const expected = layout.headers.map(normalizeHeader);
+  const actual = (sheetShape.headerRow || []).map(normalizeHeader);
+  if (actual.length !== expected.length) {
+    return bail('drift',
+      `Week ${wk}'s header row is ${actual.length} cells, expected ${expected.length}. ` +
+      `Use Deploy / Refresh to rebuild instead.`);
+  }
+  for (let i = 0; i < expected.length; i++) {
+    if (actual[i] !== expected[i]) {
+      return bail('drift',
+        `Week ${wk}'s matchups no longer match the schedule ` +
+        `(column ${i + 1}: sheet has "${actual[i]}", schedule has "${expected[i]}"). ` +
+        `Use Deploy / Refresh to rebuild instead.`);
+    }
+  }
+
+  if (sheetShape.namesStartRow !== layout.entryRowStart) {
+    return bail('names-mismatch',
+      `NAMES_${wk} starts at row ${sheetShape.namesStartRow}, expected ${layout.entryRowStart}. ` +
+      `Run Check & Import Responses to rebuild the grid.`);
+  }
+
+  const names = sheetShape.namesValues || [];
+  // A gap inside NAMES means the grid disagrees with the member list. That is a rebuild's job,
+  // not a reformat's — reject rather than filter, because filtering would silently shift every
+  // row below the gap and paint member formatting onto the wrong rows.
+  for (let i = 0; i < names.length; i++) {
+    if (!names[i] || String(names[i]).trim() === '') {
+      return bail('names-mismatch',
+        `NAMES_${wk} has a blank row at position ${i + 1}. ` +
+        `Run Check & Import Responses to rebuild the grid.`);
+    }
+  }
+  const roster = layout.members.map(r => String(r[0]));
+  if (names.length !== roster.length) {
+    return bail('names-mismatch',
+      `Week ${wk} lists ${names.length} members but the member list has ${roster.length}. ` +
+      `Run Check & Import Responses to rebuild the grid.`);
+  }
+  for (let i = 0; i < roster.length; i++) {
+    if (String(names[i]) !== roster[i]) {
+      return bail('names-mismatch',
+        `Week ${wk} row ${layout.entryRowStart + i} is "${names[i]}", expected "${roster[i]}". ` +
+        `Run Check & Import Responses to rebuild the grid.`);
+    }
+  }
+
+  return { ok: true, reason: 'ready', detail: `Week ${wk} is ready to reformat.` };
+}
+
+// VERIFY WEEKLY LAYOUT - Reads the live shape of a weekly sheet and compares it to the computed
+// layout. Returns a status object and never throws, so the same call serves both the dry-run
+// status panel (which runs it across every week) and the reformat entry point (which acts on the
+// result). One implementation, two callers, so the panel can never offer a week the reformat
+// would then refuse.
+function verifyWeeklyLayout(week, config, forms, memberData, ss) {
+  try {
+    ss = ss || fetchSpreadsheet(ss);
+    const sheet = ss.getSheetByName(`${weeklySheetPrefix}${week}`);
+    if (!sheet) {
+      return { ok: false, reason: 'no-sheet', sheet: null, layout: null,
+               detail: `No ${weeklySheetPrefix}${week} sheet exists.` };
+    }
+
+    const namesRange = ss.getRangeByName(`NAMES_${week}`);
+    const namesValues = namesRange ? namesRange.getValues().map(r => r[0]) : [];
+
+    // The sheet's own member list is authoritative for row geometry — the mode that built it
+    // (displayEmpty vs respondents-only) is not recorded anywhere, so the names on the sheet are
+    // the only reliable record of how many entry rows it has.
+    const layout = computeWeeklyLayout(week, config, forms, memberData, {
+      displayEmpty: !config.hideNonParticipants,
+      memberNames: namesValues.length ? namesValues : null,
+    });
+    if (!layout) {
+      return { ok: false, reason: 'no-form-data', sheet: sheet, layout: null,
+               detail: `Week ${week} has no form data, so there is no layout to apply.` };
+    }
+
+    const sheetShape = {
+      sheetExists: true,
+      maxRows: sheet.getMaxRows(),
+      maxCols: sheet.getMaxColumns(),
+      headerRow: sheet.getRange(layout.matchupRow, 1, 1, sheet.getMaxColumns()).getValues()[0],
+      namesExists: !!namesRange,
+      namesStartRow: namesRange ? namesRange.getRow() : -1,
+      namesNumRows: namesRange ? namesRange.getNumRows() : -1,
+      namesValues: namesValues,
+    };
+
+    const result = compareWeeklyLayout(layout, sheetShape);
+    return { ok: result.ok, reason: result.reason, detail: result.detail,
+             sheet: sheet, layout: layout };
+  } catch (err) {
+    return { ok: false, reason: 'error', sheet: null, layout: null,
+             detail: `Week ${week} could not be checked: ${err.message}` };
+  }
+}
+
 // WEEKLY Sheet Function - creates a sheet with provided week, members [array], and if data should be restored
 function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   ss = ss || fetchSpreadsheet(ss);
