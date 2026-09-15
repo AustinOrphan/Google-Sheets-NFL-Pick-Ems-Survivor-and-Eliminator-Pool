@@ -10344,7 +10344,7 @@ function writeWeeklyContent(sheet,layout,ss,rebuild) {
   }
   
   // MNF Summary Logic
-  if (layout.mnfCols && layout.mnfCols.length > 0) {
+  if (layout.mnfInclude) {
     // Dynamically create a SUM of SUMPRODUCTs for each MNF column
     const correctPicksSumString = layout.mnfCols.map(col => 
       `SUMPRODUCT(--(R${layout.entryRowStart}C${col}:R${layout.entryRowEnd}C${col}=R${effectiveOutcomeRow}C${col}))`
