@@ -1047,6 +1047,16 @@ conditional-format rules in the spreadsheet.
 1. In a **copy**, open a populated `WK` sheet → Format → Conditional formatting.
 2. Record the rule count and whether any rule targets the sub-header of a *non-final* matchup
    column. Before the fix, none do — every day rule points at the last matchup column.
+
+   **Test the larger hypothesis while you are here.** The original pushed a *builder* into
+   `formatRules` instead of a built rule, and `setConditionalFormatRules` rejects builders. That
+   call sits at picks.gs:11835, with 28 static-formatting calls AND the data restore after it,
+   all inside the try/catch at picks.gs:5415 that only toasts. So the original may have been
+   throwing there and losing **every** conditional format plus all static formatting on each
+   build — not merely the day colours. Check the execution log (Apps Script → Executions) for a
+   swallowed error on a pre-fix run, and note whether the sheet is missing row heights, frozen
+   panes, merges or column widths as well. If so, this bug is the likely root cause of the
+   original complaint and the visible improvement after rewiring will be dramatic.
 3. Paste the updated `picks.gs`, run `weeklySheet(null, 5)`. This only becomes observable
    now, in Task 6 — until `weeklySheet` was rewired it still executed the original body.
 4. Reopen the conditional-formatting sidebar. Confirm there is now one sub-header rule **per

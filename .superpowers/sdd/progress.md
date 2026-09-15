@@ -112,3 +112,23 @@ Task 5: COMPLETE (commit f9f79d9, first pass, no fix pass needed)
   stubs. A scratch-only diagnostic confirmed no free variable is undefined on 4 branch shapes
   (incl. the single-member diffCol=-1 case) - sound because no re-homed name collides with a
   picks.gs global - but it asserts nothing about formatting and was not added to tests/.
+Task 5: COMPLETE (commits f9f79d9..279cc93, review APPROVED - no Critical/Important)
+  Reviewer proved data safety at RUNTIME, not statically: recording Proxy over `sheet`,
+  3 configs, complete observed method set = 25, zero mutating. Fidelity: 39 forward
+  unmatched lines all = enumerated deltas; 46 reverse unmatched all accounted for.
+  Gate GREEN for the first time (2 entry points).
+  Confirmed setBorder judgment call correct (writeWeeklyContent has 0 setBorder; clearFormat
+  erases borders, so leaving it would have dropped every row border at Task 6).
+
+  *** MAJOR HYPOTHESIS for Task 6 manual check ***
+  Original pushed a BUILDER into formatRules; setConditionalFormatRules rejects builders.
+  That call is at picks.gs:11835 with 28 static-formatting calls AND the data restore after
+  it, all inside the try/catch at 5415 that only toasts. So the original may have been
+  losing ALL conditional + static formatting on every build. This is a strong candidate for
+  the root cause of the user's original request. Record rule counts + check Executions log.
+
+  Carry-forward to Task 6 review: clearFormat's rectangle is layout.rows x layout.finalCol,
+  NOT sheet-sized. Task 6's dimension assertion is what makes that safe - if it is ever
+  softened, stale formatting outside the rectangle survives a reformat. Flag it.
+  Follow-up: Logger.log(teamData) logs all 32 teams per reformat (commit d1c930c removed
+  the leaderboardSheet twin, never scoped the weeklySheet copy).
