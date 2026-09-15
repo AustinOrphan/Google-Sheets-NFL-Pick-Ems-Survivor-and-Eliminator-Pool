@@ -132,3 +132,39 @@ Task 5: COMPLETE (commits f9f79d9..279cc93, review APPROVED - no Critical/Import
   softened, stale formatting outside the rectangle survives a reformat. Flag it.
   Follow-up: Logger.log(teamData) logs all 32 teams per reformat (commit d1c930c removed
   the leaderboardSheet twin, never scoped the weeklySheet copy).
+Task 6: COMPLETE (commit 17f108e, first pass). weeklySheet 1033 -> 59 lines;
+  32 insertions / 1008 deletions. npm test 15/15, npm run gate "clean (2 entry point(s))",
+  node --check SYNTAX_OK, sole caller at picks.gs:5435 unchanged (7 args).
+  Accounting method: comment-stripped, normalised MULTISET comparison of the old body's 740
+  logical statements against the three extracted bodies. 652 matched exactly; the 88 residual
+  were adjudicated individually into 6 groups (see task-6-report.md).
+  writeWeeklyContent gained the `forms` 5th parameter; the layout.contests stand-in is gone.
+  THIRTEEN STATEMENTS WERE GENUINELY ORPHANED and are re-homed in weeklySheet from layout:
+    - the `totalMembers <= 0` guard + SpreadsheetApp.getUi() alert + log + return null.
+      computeWeeklyLayout is kind:'pure' and cannot call getUi(); it returns null only for a
+      missing gamePlan, a path the pickemsInclude guard already covers. The brief's
+      `if (!layout) return null` therefore does NOT cover a zero-member pool. Ordering is
+      preserved exactly - computeWeeklyLayout touches nothing.
+    - 8 pool-config diagnostic logs (tiebreaker/MNF/comments/paid, both branches) re-emitted
+      as 4 ternaries off layout.tiebreakerInclude/mnfInclude/commentsInclude/paidCheckboxes.
+    - the per-MNF-game `🔍 MNF Added in Column` log, from matchupDescriptors.filter(isMnf).
+      Verified mechanically that descriptor.col === the original's headers.length+1 across 4
+      game shapes incl. a mid-week Monday-evening game (scratchpad check, NOT added to tests/).
+    - the `🌏 Map created of new matchups` log, from written.existingData/newMatchupMap.
+  This is why the function is 59 lines, not the brief's "<45". Log ORDERING shifts (config logs
+  now precede the scrape/clean logs; the map log now follows the restore) - content complete.
+  HYPOTHESIS CONFIRMED AT SOURCE LEVEL: the old body pushed a conditional-format BUILDER into
+  formatRules (old 11113-11119: `rule.build();` discards the return, then pushes `rule`).
+  setConditionalFormatRules rejects builders, so old picks.gs:11835 threw on every build, losing
+  55 downstream sheet-mutating statements (alignment, frozen panes, row heights, ALL column
+  widths, every merge) AND the data restore AND weeklySheetTabColors - swallowed by the
+  log-and-toast-only catch at picks.gs:5518. Likely root cause of the original complaint.
+  NOT verified at runtime; Step 4b is the authoritative check.
+  MANUAL STEPS 4, 4b AND 5 ARE ALL PENDING - none can be run locally, none are claimed passing.
+  CONCERNS for final review:
+    C1 The member guard and the 10 re-homed logs are additions the brief's template omitted.
+       A reviewer who wants them dropped or relocated should overrule deliberately.
+    C2 Task 5's C1 (moved setBorder) and C2 (split validation ownership) are inherited
+       unexamined - this task's deletion is what makes either mistake permanent.
+    C3 getExistingWeeklySheetData now receives the real `forms` - strictly more correct, but a
+       live behaviour change on the rebuild path exercised only by manual Step 5.
