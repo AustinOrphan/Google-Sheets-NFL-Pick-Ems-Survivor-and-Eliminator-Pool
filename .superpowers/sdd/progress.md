@@ -210,3 +210,16 @@ Task 8: COMPLETE (commits 3ff9afe..6089c5c, 1 fix pass, review APPROVED)
   deliberately NOT fixed elsewhere - only this function carries a never-throw contract.
   Manual canaries (paid checkbox + hand-entered spread survive a reformat) remain PENDING -
   they are the authoritative check and cannot run locally.
+Task 9: COMPLETE (commits 4ca6ecb..bdf553f, 1 fix pass, review APPROVED)
+  reformatPanel.html (232 lines) + getReformatPanelData / processReformatSubmission /
+  launchReformatPanel. Reviewer independently re-derived HTML correctness, confirmed union
+  semantics make no-sheet and no-form-data reachable, and matched all 8 reason codes to the
+  LABEL map in both directions. Single notion of "ready": both paths call verifyWeeklyLayout.
+  6 disclosed deviations from my brief, all improvements. One was a real bug in MY brief:
+  !isNaN(n) passes Number('')===0, so a blank forms key would render a phantom WK 0 row.
+  Fix pass: lifted parseDocProp to top level so the panel's two new entry points get the same
+  actionable corrupt-property message Task 8 added; they had bare JSON.parse.
+Task 10: COMPLETE (commit fb6f340) - menu item, gated on config.pickemsInclude, placed with
+  the repair tools (Update Formulas / Outcomes Validation), before the rebuild tools.
+  NO separate review dispatched - single verified line; deliberate proportionality call,
+  covered by the mandatory final whole-branch review. Menu render is PENDING manual.
