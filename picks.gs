@@ -10175,11 +10175,6 @@ function writeWeeklyContent(sheet,layout,ss,rebuild) {
   if (layout.tiebreakerInclude) {
     ss.setNamedRange(`${LEAGUE}_TIEBREAKER_${layout.week}`,sheet.getRange(layout.entryRowStart,layout.tiebreakerCol,layout.totalMembers,1));
     ss.setNamedRange(`${LEAGUE}_TIEBREAKER_${layout.week}_OUTCOME`,sheet.getRange(layout.outcomeRow,layout.tiebreakerCol)); // Tiebreaker Outcome
-    let validRule = SpreadsheetApp.newDataValidation()
-      .requireNumberBetween(0,150)
-      .setHelpText('Must be an integer between 0 and 120')
-      .build();
-    sheet.getRange(layout.outcomeRow,layout.tiebreakerCol).setDataValidation(validRule);
   }
   if (layout.commentsInclude) {
     ss.setNamedRange(`COMMENTS_${layout.week}`,sheet.getRange(layout.entryRowStart,layout.commentCol,layout.totalMembers,1));
@@ -10449,6 +10444,15 @@ function applyWeeklyFormatting(sheet,layout) {
   let bonusRange = sheet.getRange(layout.bonusRow,layout.firstMatchupCol,1,layout.matchups);
   let rule = SpreadsheetApp.newDataValidation().requireValueInList(['1','2','3'],true).build();
   bonusRange.setDataValidation(rule);
+
+  // Set Data validation for tiebreaker outcome
+  if (layout.tiebreakerInclude) {
+    let validRule = SpreadsheetApp.newDataValidation()
+      .requireNumberBetween(0,150)
+      .setHelpText('Must be an integer between 0 and 120')
+      .build();
+    sheet.getRange(layout.outcomeRow,layout.tiebreakerCol).setDataValidation(validRule);
+  }
 
   sheet.getRange(layout.entryRowStart, 1, layout.numPlayers, layout.finalCol)
        .setBorder(null, null, true, null, false, true, '#AAAAAA', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
