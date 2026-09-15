@@ -900,6 +900,17 @@ These moved off the write path so they run after grid sizing:
       SpreadsheetApp.newDataValidation().requireValueInList(v.options, true).build()));
 ```
 
+**Two more validations are stranded and must move here too.** `layout.outcomeValidations`
+carries only the per-matchup winner dropdowns. The margin dropdown and the bonus dropdown sit
+in the original body and are validation, not content — if this task does not take them, Task 6
+deletes the old body and they vanish silently. Find them by content
+(`requireValueInList(Array.from({ length: 46 }` for margin; the `bonusRange` rule for bonus)
+and reproduce both rules exactly as the original builds them, addressing them through
+`layout.outcomeMarginRow` / `layout.bonusRow` and `layout.firstMatchupCol` / `layout.matchups`.
+
+Verify with `awk '/^function applyWeeklyFormatting\(/,/^}$/' picks.gs | grep -c setDataValidation`
+— expect 3 or more (per-matchup winners, margin, bonus). A count of 1 means two were lost.
+
 - [ ] **Step 6: Delta 6 — do not touch tab colour**
 
 `weeklySheetTabColors` (picks.gs:10846) repaints every WK tab from `week-1` down to 1, so it is spreadsheet-scoped. It must not appear in `applyWeeklyFormatting`. It stays in `weeklySheet` (Task 6) and is called once by the panel (Task 9).
@@ -989,7 +1000,7 @@ function weeklySheet(ss, week, config, forms, memberData, displayEmpty, rebuild)
   const sheetName = `${weeklySheetPrefix}${week}`;
   let sheet = ss.getSheetByName(sheetName);
 
-  const written = writeWeeklyContent(sheet, layout, ss, rebuild);
+  const written = writeWeeklyContent(sheet, layout, ss, rebuild, forms);
   sheet = written.sheet;
 
   applyWeeklyFormatting(sheet, layout);
@@ -1003,7 +1014,21 @@ function weeklySheet(ss, week, config, forms, memberData, displayEmpty, rebuild)
 }
 ```
 
-Also fixes the broken template literal at picks.gs:10840 — `Logger.log(\`✅ $(text)\`)` uses `$(...)` instead of `${...}` and logs the literal string.
+**Pass `forms` through rather than letting Task 4's stand-in persist.** `writeWeeklyContent`
+calls `getExistingWeeklySheetData(ss, week, forms)`, which forwards `forms` to
+`outcomeDataValidationMapping`, which reads `formsData[week]?.gamePlan?.games`. Task 4 had no
+`forms` parameter and synthesized a stand-in from `layout.contests`. That is correct today —
+verified, it is the same array object — but it breaks silently the moment that function reads
+any other field. Add `forms` as a fifth parameter to `writeWeeklyContent`, pass the real
+object from here, and delete the synthesized stand-in.
+
+**Keep the orphaned map log.** `writeWeeklyContent` holds both operands of the
+`🌏 Map created of new matchups…` line the original emitted when `existingData` was scraped.
+The pool admin reads the execution log to diagnose imports, so do not drop it.
+
+Also fixes the broken template literal in the success log — the original writes
+`Logger.log(\`✅ $(text)\`)` with `$(...)` instead of `${...}`, so it logs the literal
+characters rather than the message.
 
 - [ ] **Step 2: Verify the function shrank and still parses**
 
