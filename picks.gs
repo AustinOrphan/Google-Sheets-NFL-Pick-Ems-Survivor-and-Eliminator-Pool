@@ -9675,12 +9675,19 @@ function overallPrimaryFormulas(sheet,totalMembers,maxCols,action,avgRow,applyFo
     primary.setFormulaR1C1('=iferror(if(counta(R[0]C3:R[0]C'+maxCols+')=0,,sum(R[0]C3:R[0]C'+maxCols+')))');
     if (applyFormats) primary.setNumberFormat("##");
   }
+  // Unreachable for PCT today: every TOT/RNK/PCT call site now passes applyFormats=false, and
+  // the only callers still passing true are the MNF ones, whose sheet is never named 'PCT'
+  // (isPct is always false when applyFormats is true). PCT's number formats are now owned
+  // exclusively by applySimpleFormatting. Left in place for MNF; not dead code overall.
   if (applyFormats && isPct) {
     primary.setNumberFormat("##.#%");
   }
   if (avgRow) {
     const avgCell = sheet.getRange(sheet.getMaxRows(),2);
     avgCell.setFormulaR1C1('=iferror(if(counta(R2C[0]:R'+(totalMembers+1)+'C[0])>=3,average(R2C[0]:R'+(totalMembers+1)+'C[0]),))');
+    // Same as above: the isPct branch of this ternary is unreachable today for the same reason
+    // (applyFormats=false on every PCT call site) - PCT's average-row format is owned by
+    // applySimpleFormatting now, not this helper.
     if (applyFormats) avgCell.setNumberFormat(isPct ? '##.#%' : "#0.0");
   }
 }
@@ -9710,6 +9717,10 @@ function overallMainFormulas(weeks,sheet,totalMembers,str,avgRow,applyFormats = 
       }
 
       if (applyFormats) {
+        // The 'PCT' branch of this ternary is unreachable today: every TOT/RNK/PCT call site
+        // passes applyFormats=false, and the only callers still passing true are the MNF ones,
+        // whose sheet is never named 'PCT'. PCT's per-week number format is now owned
+        // exclusively by applySimpleFormatting. Left in place for MNF; not dead code overall.
         cell.setNumberFormat(sheet.getSheetName() === 'PCT' ? "##.#%" : "#0");
       }
     }

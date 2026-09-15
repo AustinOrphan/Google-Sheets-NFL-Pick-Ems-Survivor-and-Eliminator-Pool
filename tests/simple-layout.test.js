@@ -115,23 +115,43 @@ describe('computeSimpleLayout', () => {
     assert.notEqual(pct.avgRow, null);
   });
 
-  it('carries sheetName and named-range names straight from SIMPLE_SHEET_SPECS, not derived from the key', () => {
-    const { computeSimpleLayout, SIMPLE_SHEET_SPECS } = load();
+  it('carries sheetName and named-range names matching hardcoded literals, not SIMPLE_SHEET_SPECS itself', () => {
+    // These expected values are independent literals, verified against the pre-refactor file -
+    // NOT read from SIMPLE_SHEET_SPECS. l.spec IS SIMPLE_SHEET_SPECS[key] (the very same object
+    // reference), so asserting l.spec.* against SIMPLE_SHEET_SPECS[key].* compares the table to
+    // itself and can never fail, no matter what the table says. This is what pins the named
+    // ranges that other season sheets resolve via INDIRECT.
+    //
+    // Deliberate oddity, preserved on purpose: RNK's and PCT's named ranges are TOT-prefixed,
+    // NOT RNK_*/PCT_*. This is historical. A "tidying" refactor that renamed them to
+    // RNK_*/PCT_* would compile fine but silently break every downstream INDIRECT formula on
+    // the season sheets, which still look for the TOT_* names. Do not rename them.
+    const expected = {
+      TOT: { sheetName: 'TOTAL', namesRangeName: 'TOT_OVERALL_NAMES', overallRangeName: 'TOT_OVERALL', weeklyRangeName: 'TOT_WEEKLY' },
+      RNK: { sheetName: 'RNK', namesRangeName: 'TOT_OVERALL_RNK_NAMES', overallRangeName: 'TOT_OVERALL_RANK', weeklyRangeName: 'TOT_WEEKLY_RANK' },
+      PCT: { sheetName: 'PCT', namesRangeName: 'TOT_OVERALL_PCT_NAMES', overallRangeName: 'TOT_OVERALL_PCT', weeklyRangeName: 'TOT_WEEKLY_PCT' },
+    };
+
+    const { computeSimpleLayout } = load();
     for (const key of SPEC_KEYS) {
       const l = computeSimpleLayout(key, memberData(5));
-      const spec = SIMPLE_SHEET_SPECS[key];
-      assert.equal(l.spec.sheetName, spec.sheetName, `${key} sheetName`);
-      assert.equal(l.spec.namesRangeName, spec.namesRangeName, `${key} namesRangeName`);
-      assert.equal(l.spec.overallRangeName, spec.overallRangeName, `${key} overallRangeName`);
-      assert.equal(l.spec.weeklyRangeName, spec.weeklyRangeName, `${key} weeklyRangeName`);
+      // computeSimpleLayout returns { spec, ... } with no top-level sheetName/namesRangeName/etc
+      // (picks.gs:7294-7317) - l.spec is the only path to these, so that's what we read; the
+      // comparison target is the hardcoded `expected` above, never SIMPLE_SHEET_SPECS.
+      assert.equal(l.spec.sheetName, expected[key].sheetName, `${key} sheetName`);
+      assert.equal(l.spec.namesRangeName, expected[key].namesRangeName, `${key} namesRangeName`);
+      assert.equal(l.spec.overallRangeName, expected[key].overallRangeName, `${key} overallRangeName`);
+      assert.equal(l.spec.weeklyRangeName, expected[key].weeklyRangeName, `${key} weeklyRangeName`);
     }
+  });
 
-    // RNK's named ranges are TOT-prefixed, NOT RNK-prefixed. A "tidying" refactor that renamed
-    // them to RNK_* would silently break every downstream INDIRECT formula on the season sheets.
-    const rnk = computeSimpleLayout('RNK', memberData(5));
-    assert.equal(rnk.spec.namesRangeName, 'TOT_OVERALL_RNK_NAMES');
-    assert.equal(rnk.spec.overallRangeName, 'TOT_OVERALL_RANK');
-    assert.equal(rnk.spec.weeklyRangeName, 'TOT_WEEKLY_RANK');
+  it('returns null (not just falsy) for an unknown spec key', () => {
+    // simpleSheet guards with `if (!layout)`, so any falsy value works there today - but
+    // asserting `=== null` specifically means a future change to e.g. `{}` (truthy, and would
+    // silently slip past that guard) or `undefined` gets caught here instead of downstream.
+    const { computeSimpleLayout } = load();
+    const l = computeSimpleLayout('NOPE', memberData(5));
+    assert.equal(l, null, 'computeSimpleLayout with an unknown spec key should return null');
   });
 
   it('member names flow through in member order as an Nx1 array of arrays', () => {
