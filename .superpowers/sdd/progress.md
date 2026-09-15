@@ -74,3 +74,41 @@ Task 4: COMPLETE (commits ce00161..deeaa78, review APPROVED - fidelity clean, fi
   adjustColumns, so maxCols === finalCol at every one; layout.finalCol substitutes cleanly.
   Also: the paid chain drops SIX formatting calls to Task 5, not four (brief prose said
   four; plan Step 3 already carries all six).
+Task 5: COMPLETE (commit f9f79d9, first pass, no fix pass needed)
+  556 insertions / 0 deletions; weeklySheet, computeWeeklyLayout and writeWeeklyContent all
+  byte-for-byte untouched. `npm run gate` is GREEN for the first time:
+  "banned-api gate: clean (2 entry point(s))". npm test 15/15, node --check SYNTAX_OK.
+  Task 1's open question answered: the bare-word callee traversal produces NO false positives
+  now that applyWeeklyFormatting exists (hexGradient is the only function it pulls in).
+  Fidelity verified by reconstructing the original ranges from the same file (weeklySheet
+  shifted +556), stripping the layout. prefix, and diffing - every hunk is an enumerated delta.
+  All 6 briefed deltas applied. Extra necessary substitutions (all documented in the report):
+  maxCols/columns/getMaxColumns -> layout.finalCol (7+2+2 sites); subHeadersPriorLength
+  re-derived as firstMatchupCol-1 (substituting at the use site would have been an off-by-one,
+  caught in review); parities/baseFormulas/allPicksRange aliased so the 24-rule loop stays
+  byte-identical; `let range` declared (it is an implicit global in weeklySheet); config
+  predicates -> layout.mnfInclude/tiebreakerInclude/commentsInclude/config.bonusInclude;
+  diffCol>0 guards at the 3 cohesion sites (Task 2 sentinel).
+  CONCERNS for final review:
+    C1 IMPORTANT: setBorder (pre-insert picks.gs:10720-10721) was moved even though the
+       brief's source-range list omits it. It is unambiguously formatting, is NOT in
+       writeWeeklyContent, and clearFormat erases borders - leaving it behind would have made
+       Task 6 silently drop every row border. Only statement in the new function not traceable
+       to a briefed range. Reviewer should confirm the call.
+    C2 Validation ownership is now split: the tiebreaker requireNumberBetween(0,150) stayed in
+       writeWeeklyContent (Task 4), the other four validations are in applyWeeklyFormatting.
+       Benign (clearFormat does not drop validations) but asymmetric. Decide at Task 13.
+    C3 clearFormat's rectangle is layout-sized, not sheet-sized; stale formatting outside
+       rows x finalCol survives a reformat-only run. Safe ONLY because Task 6's verify step
+       asserts the dimensions - do not soften that assertion.
+    C4/C5 pre-existing, moved verbatim: hideRows is one-way (never un-hides if config flips);
+       Logger.log(teamData) still logs all 32 teams per reformat despite commit d1c930c's
+       title "Remove Logger.log for team data".
+  MANUAL, still pending: brief Step 8b (day-coloration fix) and plan Task 8 canaries (ticked
+  paid checkbox + hand-entered spread must survive a reformat). BOTH are only observable after
+  Task 6 rewires weeklySheet - Step 8b as written says to run weeklySheet(null,5), which today
+  still executes the ORIGINAL body. Re-schedule 8b to Task 6/8.
+  Deliberately NOT written: any test that drives applyWeeklyFormatting through the harness
+  stubs. A scratch-only diagnostic confirmed no free variable is undefined on 4 branch shapes
+  (incl. the single-member diffCol=-1 case) - sound because no re-homed name collides with a
+  picks.gs global - but it asserts nothing about formatting and was not added to tests/.
