@@ -11126,6 +11126,19 @@ function verifyWeeklyLayout(week, config, forms, memberData, ss) {
   }
 }
 
+// Parses a stored document property by name, tagging any JSON error with the property
+// name so a corrupt property reports which one instead of throwing a raw SyntaxError.
+// Shared by reformatWeeklySheet, getReformatPanelData and processReformatSubmission so a
+// corrupt configuration/forms/members property gives the same actionable message no matter
+// which of the three reads it.
+function parseDocProp(docProps, name) {
+  try {
+    return JSON.parse(docProps.getProperty(name));
+  } catch (err) {
+    throw new Error(`"${name}" document property is not valid JSON (${err.message})`);
+  }
+}
+
 /**
  * Reapplies generated formatting to one weekly sheet.
  * Never clears the sheet, never writes a value or formula, never resizes the
@@ -11135,20 +11148,10 @@ function reformatWeeklySheet(week, ss, config, forms, memberData) {
   ss = ss || fetchSpreadsheet(ss);
   const docProps = (!config || !forms || !memberData)
     ? PropertiesService.getDocumentProperties() : null;
-  // Parses a stored document property by name, tagging any JSON error with the property
-  // name so a corrupt property reports which one instead of throwing out of a function
-  // contracted to never throw.
-  const parseDocProp = (name) => {
-    try {
-      return JSON.parse(docProps.getProperty(name));
-    } catch (err) {
-      throw new Error(`"${name}" document property is not valid JSON (${err.message})`);
-    }
-  };
   try {
-    config = config || parseDocProp('configuration') || {};
-    forms = forms || parseDocProp('forms') || {};
-    memberData = memberData || parseDocProp('members') || {};
+    config = config || parseDocProp(docProps, 'configuration') || {};
+    forms = forms || parseDocProp(docProps, 'forms') || {};
+    memberData = memberData || parseDocProp(docProps, 'members') || {};
   } catch (err) {
     Logger.log(`⛔ Week ${week} not reformatted [error]: ${err.message}`);
     return { week: week, ok: false, reason: 'error',
@@ -11189,9 +11192,9 @@ function getReformatPanelData() {
   // config.hideNonParticipants with no fallback of its own, and re-reading per week would cost
   // roughly 18 redundant PropertiesService round trips for a full season.
   const docProps = PropertiesService.getDocumentProperties();
-  const config = JSON.parse(docProps.getProperty('configuration')) || {};
-  const forms = JSON.parse(docProps.getProperty('forms')) || {};
-  const memberData = JSON.parse(docProps.getProperty('members')) || {};
+  const config = parseDocProp(docProps, 'configuration') || {};
+  const forms = parseDocProp(docProps, 'forms') || {};
+  const memberData = parseDocProp(docProps, 'members') || {};
 
   // Number('') and Number(' ') are both 0, so a stray blank key would otherwise become a bogus
   // "WK 0" row; require a positive integer rather than merely not-NaN.
@@ -11228,9 +11231,9 @@ function getReformatPanelData() {
 function processReformatSubmission(weeks) {
   const ss = fetchSpreadsheet();
   const docProps = PropertiesService.getDocumentProperties();
-  const config = JSON.parse(docProps.getProperty('configuration')) || {};
-  const forms = JSON.parse(docProps.getProperty('forms')) || {};
-  const memberData = JSON.parse(docProps.getProperty('members')) || {};
+  const config = parseDocProp(docProps, 'configuration') || {};
+  const forms = parseDocProp(docProps, 'forms') || {};
+  const memberData = parseDocProp(docProps, 'members') || {};
 
   const list = (Array.isArray(weeks) ? weeks : [])
     .map(Number)
