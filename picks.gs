@@ -1,7 +1,7 @@
-const VERSION = '1.2.4';
+const VERSION = '1.2.5';
 /** GOOGLE SHEETS FOOTBALL PICK 'EMS, SURVIVOR, & ELIMINATOR TOOL | 2025 Edition
  * Script Library for League Creator & Management Platform
- * 09/06/2026
+ * 09/16/2026
  * 
  * Created by Ben Powers
  * ben.powers.creative@gmail.com
@@ -51,6 +51,8 @@ const VERSION = '1.2.4';
  *    ✏️ Rename a Member - Safely update a member's name across all formulas, sheets, and databases
  *    🧮 Update Formulas - Force recalculation and formula refresh across all summary/aggregate sheets
  *    ✅ Update Outcomes Sheet Validation - Rebuild column rules and validation on the master outcomes tab
+ *    📝 Update Form Template ID - Safe manual check of existing document property with confirmation of an override document ID
+ *    💾 Update Database ID - Safe manual check of existing document property with confirmation of an override document ID
  *    👑 Rebuild Survivor Sheet - Safely rebuilds the Survivor sheet layout and restores picks (if enabled)
  *    💀 Rebuild Eliminator Sheet - Safely rebuilds the Eliminator sheet layout and restores picks (if enabled)
  * 
@@ -144,7 +146,10 @@ function onOpen() {
         .addItem('📊 Update Spread Data', 'fetchLatestSpreadsForWeek')
         .addItem('✏️ Rename a Member', 'showRenamePanel')
         .addItem('🧮 Update Formulas', 'allFormulasUpdate')
-        .addItem('✅ Update Outcomes Sheet Validation', 'outcomesSheetUpdatePrompt');
+        .addItem('✅ Update Outcomes Sheet Validation', 'outcomesSheetUpdatePrompt')
+        .addSeparator()
+        .addItem('📝 Update Form Template ID', 'manualTemplateID')
+        .addItem('💾 Update Database ID', 'manualDatabaseID');
 
       if (config.pickemsInclude) {
         utilMenu.addItem('🎨 Reapply Formatting', 'launchReformatPanel');
@@ -4664,8 +4669,8 @@ function buildFormFromGamePlan(gamePlan) {
               ss.toast(contestText,`${contestIcon} CREATING CONTEST QUESTION`);
               Logger.log(`${contestIcon} Creating Customized Page: ${contestText}`);
               
-              if (survivor) survivorHelp = sLS == 1 ? `One Survivor Life: ${createLivesString(member.sL[sLivesIndex],sLS)}` : `Survivor Lives: ${createLivesString(member.sL[sLivesIndex],sLS)} (${member.sL[sLivesIndex] < sLS ? member.sL[sLivesIndex] + ' remaining' : 'all remaining'})`;
-              if (eliminator) eliminatorHelp = eLS == 1 ? `One Eliminator Life: ${createLivesString(member.eL[eLivesIndex],eLS)}` : `Eliminator Lives: ${createLivesString(member.eL[eLivesIndex],eLS)} (${member.eL[eLivesIndex] < eLS ? member.eL[eLivesIndex] + ' remaining' : 'all remaining'})`;
+              if (survivor) survivorHelp = member.sL[sLivesIndex] == 0 ? `Eliminated from Survivor: ${createLivesString(member.sL[sLivesIndex],sLS)}` : sLS == 1 ? `One Survivor Life: ${createLivesString(member.sL[sLivesIndex],sLS)}` : `Survivor Lives: ${createLivesString(member.sL[sLivesIndex],sLS)} (${member.sL[sLivesIndex] < sLS ? member.sL[sLivesIndex] + ' remaining' : 'all remaining'})`;
+              if (eliminator) eliminatorHelp = member.eL[eLivesIndex] == 0 ? `Eliminated from Eliminator: ${createLivesString(member.eL[eLivesIndex],eLS)}` : eLS == 1 ? `One Eliminator Life: ${createLivesString(member.eL[eLivesIndex],eLS)}` : `Eliminator Lives: ${createLivesString(member.eL[eLivesIndex],eLS)} (${member.eL[eLivesIndex] < eLS ? member.eL[eLivesIndex] + ' remaining' : 'all remaining'})`;
               helpText = contests > 1 ? `${survivorHelp}  |  ${eliminatorHelp}` : (survivor ? survivorHelp : eliminatorHelp);
               
               const title = `${member.name}'s ${both ? 'Survivor & Eliminator' : (survivorStatus ? 'Survivor' : 'Eliminator')} Pick${both ? 's' : ''}`;
@@ -5126,7 +5131,7 @@ function buildTeamList(gamePlan, config, isAts) {
  * @returns {string} character string representing lives left and those have been lost (red dot or empty square)
  */
 function createLivesString(remaining, total) {
-  return '🟢'.repeat(remaining)+'⚫'.repeat(total - remaining);
+  return '🟢'.repeat(remaining)+'❌'.repeat(total - remaining);
 }
 
 /**
@@ -7012,8 +7017,13 @@ function outcomesSheetUpdate(ss,week,config,gamePlan) {
   
   matchups.clearDataValidations().clearNote();
   margins.clearDataValidations().clearNote();
-  
-  let existingRules = sheet.getConditionalFormatRules();
+
+  let existingRules = [];
+  try { 
+    existingRules = sheet.getConditionalFormatRules();
+  } catch (err) {
+    Logger.log(`⭕ No existing conditional format rules, providing empty array.`);
+  }
   let rulesToKeep = [];
   let newRules = [];
   for (let a = 0; a < existingRules.length; a++) {
@@ -12274,6 +12284,202 @@ function showToast(message,ss) {
   ss.toast(message);
 }
 
+// ============================================================================================================================================
+// MANUAL ID UPDATE UTILITIES
+// ============================================================================================================================================
+
+/**
+ * Entry point for manually updating the Template Form ID.
+ */
+function manualTemplateID() {
+  manualDocumentID('templateId', 'Template Form', 'FORM');
+}
+
+/**
+ * Entry point for manually updating the Backend Database Spreadsheet ID.
+ */
+function manualDatabaseID() {
+  manualDocumentID('databaseId', 'Backend Response Database', 'SPREADSHEET');
+}
+
+/**
+ * Helper to construct the full direct URL for manual browser verification.
+ * 
+ * @param {string} id - The file ID.
+ * @param {string} expectedType - 'FORM' or 'SPREADSHEET'.
+ * @returns {string} The full Google Docs/Sheets/Forms URL.
+ */
+function buildDocumentUrl(id, expectedType) {
+  if (!id || id.trim() === '') return 'N/A';
+  return expectedType === 'FORM'
+    ? `https://docs.google.com/forms/d/${id.trim()}/edit`
+    : `https://docs.google.com/spreadsheets/d/${id.trim()}/edit`;
+}
+
+/**
+ * Core engine for reviewing, verifying, and updating document IDs in DocumentProperties.
+ *
+ * @param {string} propKey - The property key ('templateId' or 'databaseId').
+ * @param {string} typeLabel - Human-readable name of the document.
+ * @param {string} expectedType - 'FORM' or 'SPREADSHEET' to validate MIME type.
+ */
+function manualDocumentID(propKey, typeLabel, expectedType) {
+  const ss = fetchSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const docProps = PropertiesService.getDocumentProperties();
+  const activeUser = Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail();
+
+  Logger.log(`🔍 [MANUAL ID UPDATE] Initiated for property '${propKey}' (${typeLabel}) by user: ${activeUser || 'Unknown'}`);
+
+  // --- Step 1: Inspect Current Property State ---
+  const currentId = docProps.getProperty(propKey);
+  const currentUrl = buildDocumentUrl(currentId, expectedType);
+  let currentStatusText = '• No ID currently stored in Document Properties';
+
+  if (currentId) {
+    try {
+      const currentFile = DriveApp.getFileById(currentId);
+      if (currentFile.isTrashed()) {
+        currentStatusText = `⚠️ IN TRASH: "${currentFile.getName()}"\n• ID: ${currentId}\n• URL: ${currentUrl}`;
+        Logger.log(`⚠️ Current ${propKey} file is in trash: ${currentId}`);
+      } else {
+        let owner = 'Unknown / Shared Drive';
+        try { owner = currentFile.getOwner()?.getEmail() || owner; } catch (e) {}
+        currentStatusText = `✅ Accessible: "${currentFile.getName()}"\n• ID: ${currentId}\n• Owner: ${owner}\n• URL: \n\n${currentUrl}`;
+        Logger.log(`✅ Current ${propKey} file accessible: "${currentFile.getName()}" (Owner: ${owner})`);
+      }
+    } catch (e) {
+      currentStatusText = `⚠️ ACCESS DENIED / NOT FOUND (${currentId})\n• URL: \n\n${currentUrl}\n\n• Note: You likely lack view/edit access with your current account.`;
+      Logger.log(`⚠️ Current ${propKey} file inaccessible (${currentId}): ${e.message}`);
+    }
+  }
+
+  // --- Step 2: Prompt for New ID or URL ---
+  const promptMessage = `${currentStatusText}\n\n` +
+    `Enter the new File ID or paste the full Google ${expectedType === 'FORM' ? 'Form' : 'Sheet'} URL below:`;
+
+  const promptResponse = ui.prompt(`Update ${typeLabel} ID`, promptMessage, ui.ButtonSet.OK_CANCEL);
+
+  if (promptResponse.getSelectedButton() !== ui.Button.OK) {
+    ss.toast('Canceled ID update.', '🚫 CANCELED', 3);
+    Logger.log(`🚫 [MANUAL ID UPDATE] User canceled prompt for '${propKey}'.`);
+    return;
+  }
+
+  const rawInput = promptResponse.getResponseText().trim();
+  Logger.log(`📥 Received user raw input for '${propKey}': "${rawInput}"`);
+
+  if (!rawInput) {
+    ui.alert('⚠️ Invalid Input', 'No ID or URL was provided. No changes were made.', ui.ButtonSet.OK);
+    Logger.log(`⚠️ User submitted an empty input for '${propKey}'. Aborting.`);
+    return;
+  }
+
+  // --- Step 3: Extract Clean File ID (from Raw ID or Full URL) ---
+  let targetId = rawInput;
+  const urlMatch = rawInput.match(/\/d\/([a-zA-Z0-9-_]{25,100})/);
+  if (urlMatch && urlMatch[1]) {
+    targetId = urlMatch[1];
+    Logger.log(`🔎 Extracted ID from pasted URL: "${targetId}"`);
+  } else {
+    const idMatch = rawInput.match(/([a-zA-Z0-9-_]{25,100})/);
+    if (idMatch && idMatch[1]) {
+      targetId = idMatch[1];
+      Logger.log(`🔎 Cleaned raw ID string: "${targetId}"`);
+    }
+  }
+
+  const idRegex = /^[a-zA-Z0-9-_]{25,100}$/;
+  const isValidFormat = idRegex.test(targetId);
+  const targetUrl = buildDocumentUrl(targetId, expectedType);
+
+  Logger.log(`📋 Target ID: "${targetId}" | Format Valid: ${isValidFormat} | Generated URL: ${targetUrl}`);
+
+  // --- Step 4: Verification & Ownership Check ---
+  let isAccessible = false;
+  let isOwner = false;
+  let isCorrectType = false;
+  let isTrashed = false;
+  let fileName = 'Unknown / Inaccessible';
+  let fileType = 'Unknown';
+  let ownerEmail = 'Unknown / Shared Drive';
+  let accessErrorNote = '';
+
+  if (isValidFormat) {
+    try {
+      const file = DriveApp.getFileById(targetId);
+      fileName = file.getName();
+      isTrashed = file.isTrashed();
+      isAccessible = true;
+
+      const mime = file.getMimeType();
+      if (expectedType === 'FORM') {
+        isCorrectType = (mime === MimeType.GOOGLE_FORMS);
+        fileType = isCorrectType ? 'Google Form' : `Unexpected (${mime})`;
+      } else if (expectedType === 'SPREADSHEET') {
+        isCorrectType = (mime === MimeType.GOOGLE_SHEETS);
+        fileType = isCorrectType ? 'Google Spreadsheet' : `Unexpected (${mime})`;
+      }
+
+      try {
+        const ownerObj = file.getOwner();
+        if (ownerObj) {
+          ownerEmail = ownerObj.getEmail();
+          if (activeUser && ownerEmail.toLowerCase() === activeUser.toLowerCase()) {
+            isOwner = true;
+          }
+        }
+      } catch (e) {
+        ownerEmail = 'Shared Drive / Domain Restricted';
+      }
+
+      Logger.log(`✅ [TARGET VERIFIED] Name: "${fileName}" | MIME: ${mime} (Correct: ${isCorrectType}) | Owner: ${ownerEmail} (IsOwner: ${isOwner}) | InTrash: ${isTrashed}`);
+
+    } catch (err) {
+      Logger.log(`⚠️ [TARGET DRIVE ERROR] Failed to access ${targetId}: ${err.message}`);
+      // Assumes permissions issue if the string is otherwise valid
+      accessErrorNote = '⚠️ ACCESS DENIED / NOT FOUND:\nYou likely lack view/edit permissions with your current Google account, or the file does not exist.';
+    }
+  } else {
+    accessErrorNote = '❌ INVALID ID FORMAT:\nThe string submitted does not match standard Google Drive ID length/characters.';
+    Logger.log(`❌ Target ID format invalid: "${targetId}"`);
+  }
+
+  // --- Step 5: Build Summary Report & Confirm ---
+  let report = `PRE-FLIGHT VERIFICATION REPORT\n\n`;
+  report += `• Target ID: ${targetId}\n`;
+  report += `• Direct URL:\n\n  ${targetUrl}\n\n`;
+  report += `• Format Valid: ${isValidFormat ? '✅ Yes' : '❌ No'}\n`;
+
+  if (isAccessible) {
+    report += `• Accessible by Script: ✅ Yes\n`;
+    report += `• File Name: "${fileName}"\n`;
+    report += `• File Type: ${isCorrectType ? `✅ ${fileType}` : `⚠️ WRONG TYPE: ${fileType} (Expected ${expectedType})`}\n`;
+    report += `• In Trash: ${isTrashed ? '⚠️ YES (File is in Trash)' : '✅ No'}\n`;
+    report += `• Owner: ${isOwner ? `✅ You (${ownerEmail})` : `⚠️ ${ownerEmail}`}\n\n`;
+  } else {
+    report += `• Accessible by Script: ❌ No\n`;
+    report += `• Status Note: ${accessErrorNote}\n\n`;
+  }
+
+  if (!isAccessible || !isCorrectType || isTrashed || !isOwner) {
+    report += `⚠️ Note: You can manually copy the URL above and paste it into your browser to test permissions.\n\n`;
+  }
+
+  report += `Do you want to proceed and save this ID to Document Properties?`;
+
+  const confirmResponse = ui.alert('Confirm Property Update', report, ui.ButtonSet.YES_NO);
+
+  // --- Step 6: Commit or Abort ---
+  if (confirmResponse === ui.Button.YES) {
+    docProps.setProperty(propKey, targetId);
+    ss.toast(`Updated '${propKey}' to ${targetId}`, '✅ PROPERTY UPDATED', 6);
+    Logger.log(`💾 [SUCCESS] Committed DocumentProperty '${propKey}' = "${targetId}"`);
+  } else {
+    ss.toast('Update canceled by user.', '🚫 NOT SAVED', 3);
+    Logger.log(`🚫 [ABORTED] User elected not to save DocumentProperty '${propKey}'.`);
+  }
+}
 
 // ============================================================================================================================================
 // DEBUG TOOLS
