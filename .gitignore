@@ -1,3 +1,7 @@
 # local working files
 docs/audit/
 docs/AUDIT-NOTES.md
+
+# agent workflow scaffolding - local only, never upstream
+docs/superpowers/
+.superpowers/
