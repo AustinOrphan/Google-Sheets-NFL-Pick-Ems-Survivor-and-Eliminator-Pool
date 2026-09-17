@@ -5,3 +5,6 @@ docs/AUDIT-NOTES.md
 # agent workflow scaffolding - local only, never upstream
 docs/superpowers/
 .superpowers/
+
+# clasp config - holds the Apps Script project ID of a personal spreadsheet
+.clasp.json
