@@ -4711,7 +4711,10 @@ function buildFormFromGamePlan(gamePlan) {
     ss.toast(`Returning information to form creation controller...`,`↩️ REROUTING DATA`);
     
     const formId = form.getId();
-    if (config.kickoffLock) setOneTimeFormLockTrigger(formId, gamePlan);
+    // The 'close' policy promises the form shuts at the first kickoff, so it arms the same
+    // one-time lock trigger kickoffLock does. resolveLatePolicy, rather than the raw value,
+    // keeps an unrecognized setting from arming a trigger nobody asked for.
+    if (config.kickoffLock || resolveLatePolicy(config.latePolicy) === 'close') setOneTimeFormLockTrigger(formId, gamePlan);
     
     return {
       formId: formId,
