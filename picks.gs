@@ -5546,6 +5546,42 @@ function countBlankOutcomes(ss, week) {
   }, 0);
 }
 
+// Enable from the panel. Runs the first check immediately (user-initiated, so full auth), which
+// both imports anything currently missing and arms the chain from real game statuses.
+function enableOutcomeAutoFetch() {
+  PropertiesService.getDocumentProperties().setProperty(OUTCOME_FETCH_ENABLED_KEY, 'true');
+  runOutcomesCheck({});
+  const status = readOutcomeFetchStatus();
+  return { success: true, nextCheck: status.nextCheck || null };
+}
+
+function disableOutcomeAutoFetch() {
+  const docProps = PropertiesService.getDocumentProperties();
+  docProps.deleteProperty(OUTCOME_FETCH_ENABLED_KEY);
+  const removed = deleteOutcomeFetchTriggers();
+  recordOutcomeFetchStatus({ nextCheck: null, result: 'disabled' });
+  SpreadsheetApp.getActiveSpreadsheet().toast(removed ? '❌ Outcome auto-fetch disabled.' : '❌ Outcome auto-fetch was not running.');
+  return { success: true };
+}
+
+// What the panel shows. `armed` is the truth from ScriptApp; `nextCheck` is what we planned.
+// They disagree only when the chain has died, which is exactly what the panel needs to surface.
+function getOutcomeAutoFetchStatus() {
+  const docProps = PropertiesService.getDocumentProperties();
+  const status = readOutcomeFetchStatus();
+  const armed = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === OUTCOME_FETCH_HANDLER);
+  return {
+    enabled: docProps.getProperty(OUTCOME_FETCH_ENABLED_KEY) === 'true',
+    armed: armed,
+    lastRun: status.lastRun || null,
+    week: status.week || null,
+    imported: status.imported || 0,
+    result: status.result || null,
+    detail: status.detail || '',
+    nextCheck: status.nextCheck || null,
+  };
+}
+
 /**
  * The main data-gathering function for the Import Picks panel.
  * This is called by the client-side script on load.
