@@ -5494,6 +5494,10 @@ function executePickImport(week, importOnlyStartedGames) {
       }
 
       // --- 3. Run the policy's passes over the grid ---
+      // Members whose submission held no question about a given matchup. Their cells are
+      // left alone rather than voided, and the operator is told once per matchup afterwards:
+      // it almost always means the form was regenerated after those members submitted.
+      const unmatchedByMatchup = new Map();
       const passes = latePolicyPasses(config.latePolicy, gamePlan, Date.now());
       passes.forEach(pass => {
         // asOf === null means "no cutoff", which is the parse already done above.
@@ -5523,15 +5527,14 @@ function executePickImport(week, importOnlyStartedGames) {
             const memberId = nameToMemberId.get(memberName);
             const memberPicks = memberId ? passPicks[memberId] : null;
 
-            let pick = null;
-            if (memberPicks) {
-              for (const question in memberPicks.pickem) {
-                if (question.includes(game.awayTeamName) && question.includes(game.homeTeamName)) {
-                  const answer = memberPicks.pickem[question];
-                  if (answer === game.awayTeam || answer === game.homeTeam) pick = answer;
-                  break;
-                }
-              }
+            const { matched, pick } = pickForGame(memberPicks, game);
+            // Submitted, but never asked about this matchup. Voiding the cell would punish
+            // them for a question that was not on their form, so leave it untouched and
+            // report it instead. A member with no submission at all still gets N/A below.
+            if (memberPicks && !matched) {
+              if (!unmatchedByMatchup.has(matchupShortName)) unmatchedByMatchup.set(matchupShortName, new Set());
+              unmatchedByMatchup.get(matchupShortName).add(memberName);
+              return;
             }
 
             const action = latePickCellAction(picksData[rowIndex][colIndex], gameStarted, pick, pass.fill);
@@ -5539,6 +5542,11 @@ function executePickImport(week, importOnlyStartedGames) {
             else if (action === 'na') picksData[rowIndex][colIndex] = 'N/A';
           });
         });
+      });
+
+      unmatchedByMatchup.forEach((names, matchup) => {
+        const who = [...names].map(name => `"${name}"`).join(', ');
+        Logger.log(`⚠️ Week ${week} ${matchup}: no question in the submission from ${who} matched this matchup, so those cells were left as they are rather than voided. The form was most likely regenerated after they submitted.`);
       });
 
       // The tiebreaker follows its own game's kickoff, not the week's, so a member
@@ -5554,11 +5562,15 @@ function executePickImport(week, importOnlyStartedGames) {
         const rowIndex = memberNameToRowMap.get(member.name);
         if (rowIndex === undefined) continue;
         const tb = tbPicks[memberId];
-        // Under a policy, only fill a blank tiebreaker: a filled one is already locked.
+        // The tiebreaker is one cell attached to one game, so it follows that game's column
+        // rather than a rule of its own: write the answer as of the cutoff, unconditionally.
+        // tbCutoff is already the lock, and it is a fixed instant (null under 'none', a
+        // kickoff otherwise), so re-writing the same answer on every later import is
+        // idempotent. Only filling a blank cell instead would freeze the tiebreaker at
+        // whatever the first import of the week happened to see, and a member who improved
+        // their guess before that game kicked off would never have the update land.
         if (tb && tb.tiebreaker && tiebreakers && tiebreakers[rowIndex]) {
-          const existing = tiebreakers[rowIndex][0];
-          const isBlank = existing === '' || existing === null || existing === undefined;
-          if (tbCutoff === null || isBlank) tiebreakers[rowIndex][0] = tb.tiebreaker;
+          tiebreakers[rowIndex][0] = tb.tiebreaker;
         }
         const picks = parsedPicks[memberId];
         if (picks.comments && comments && comments[rowIndex]) comments[rowIndex][0] = picks.comments;
@@ -5901,7 +5913,8 @@ function gamesAfter(gamePlan, when) {
 /**
  * Turns a policy name into the passes the importer should run, in order.
  * A pass is { asOf, games, fill }: parse responses with that cutoff, write those games
- * (null means all of them), overwriting or filling blanks only.
+ * (null means all of them), with `fill` deciding what happens to a cell that already
+ * holds something. See latePickCellAction for the three fill modes.
  *
  * A week with no usable kickoff times cannot express any policy, so it falls back to
  * today's behavior rather than voiding anything.
@@ -5935,10 +5948,17 @@ function latePolicyPasses(policy, gamePlan, now) {
   // 11am must not freeze the 1pm games, or a member who changes their pick at 12:30 would
   // find the 11am value stuck. Games still to come get one overwriting pass instead, so
   // the grid previews them live and they stay changeable right up to their own kickoff.
+  //
+  // A locking pass fills with 'lock', not 'blanks', so the result does not depend on when
+  // the operator imported. Its cutoff is a kickoff, a fixed instant in the past, so the
+  // answer it computes never changes and re-asserting it is idempotent. With 'blanks' the
+  // preview value written by an earlier import would already fill the cell, the locking
+  // pass would skip it, and the as-of-kickoff answer would be lost along with any legal
+  // pre-kickoff pick change the member made after that earlier import.
   const passes = [];
   kickoffs.forEach(kickoff => {
     if (kickoff <= now) {
-      passes.push({ asOf: kickoff, games: gamesStartingAt(gamePlan, kickoff), fill: 'blanks' });
+      passes.push({ asOf: kickoff, games: gamesStartingAt(gamePlan, kickoff), fill: 'lock' });
     }
   });
   // A game whose date cannot be read has no kickoff to lock against, so it rides along with
@@ -5952,20 +5972,78 @@ function latePolicyPasses(policy, gamePlan, now) {
 
 /**
  * Decides what to do with one member's cell for one game.
- * @param {*} currentValue What the sheet holds today. Anything non-empty means "locked".
+ *
+ * The three fill modes differ only in what they do to a cell that already holds something:
+ *  'overwrite' always writes the pick, and never voids. This is today's behavior.
+ *  'blanks' writes only into an empty cell, so the first value written wins. That is what
+ *      makes a moving cutoff safe: 'freeze' re-parses up to `now`, and without this rule a
+ *      member could keep editing a pick that was supposed to be frozen at first kickoff.
+ *  'lock' always writes the pick, like 'overwrite', but also voids a started game with no
+ *      pick. It is only ever used with a cutoff that is a fixed instant in the past, so the
+ *      answer it computes never changes and re-writing it on every later import is
+ *      idempotent. 'blanks' cannot be used there: on the import after a kickoff the cell
+ *      already holds the preview value, 'blanks' would skip it, and the as-of-kickoff
+ *      answer would never land. The grid would then depend on when the operator imported.
+ *
+ * @param {*} currentValue What the sheet holds today. Anything non-empty means "filled".
  * @param {boolean} gameStarted Live scoreboard state, not clock arithmetic.
  * @param {string|null} pick The member's pick as of this pass's cutoff, or null.
- * @param {string} fill 'overwrite' or 'blanks'.
+ * @param {string} fill 'overwrite', 'blanks' or 'lock'.
  * @returns {string} 'skip', 'write' or 'na'
  */
 function latePickCellAction(currentValue, gameStarted, pick, fill) {
   const isFilled = currentValue !== '' && currentValue !== null && currentValue !== undefined;
   if (fill === 'blanks' && isFilled) return 'skip';
   if (pick) return 'write';
-  // Only a started game can be voided, and only in a blank-filling pass. An unstarted
-  // game with no pick is simply still open.
-  if (fill === 'blanks' && gameStarted) return 'na';
+  // Only a started game can be voided, and only in a pass that is locking an answer down.
+  // An unstarted game with no pick is simply still open, and 'overwrite' never voids at all.
+  if ((fill === 'blanks' || fill === 'lock') && gameStarted) return 'na';
   return 'skip';
+}
+
+/**
+ * Whether a form question is about a particular matchup. Both full team names have to
+ * appear, which is how executePickImport has always lined a question up with a game.
+ */
+function questionMatchesGame(question, game) {
+  if (!game || !game.awayTeamName || !game.homeTeamName) return false;
+  const text = question === null || question === undefined ? '' : question.toString();
+  return text.includes(game.awayTeamName) && text.includes(game.homeTeamName);
+}
+
+/**
+ * One member's answer for one game, read out of their parsed submission.
+ *
+ * `matched` and `pick` are deliberately separate. A form regenerated mid-week with a game
+ * added or a matchup corrected leaves the affected respondents with no question about that
+ * game at all, and "was never asked" is not the same thing as "was asked and left it
+ * blank". Collapsing the two lets a locking pass void a member with N/A for a question they
+ * never saw, which is exactly the data loss the whole policy exists to prevent.
+ *
+ * `matched` reads the questions the form asked, not the answers it got, because the parser
+ * stores nothing at all for a blank answer. Falling back to the answered questions keeps
+ * this working on a picks cache built before `questions` existed.
+ *
+ * @param {Object|null} memberPicks One member's entry from parseAllPicksFromSheet, or null.
+ * @param {Object} game A gamePlan game, with awayTeam/homeTeam and their full team names.
+ * @returns {{matched: boolean, pick: (string|null)}} `matched` is true when the submission
+ *          was asked about this matchup. `pick` is their answer when it names one of the
+ *          two teams, and null otherwise.
+ */
+function pickForGame(memberPicks, game) {
+  const result = { matched: false, pick: null };
+  if (!memberPicks || !memberPicks.pickem || !game) return result;
+  const asked = memberPicks.questions || Object.keys(memberPicks.pickem);
+  result.matched = asked.some(question => questionMatchesGame(question, game));
+  if (!result.matched) return result;
+  for (const question in memberPicks.pickem) {
+    if (questionMatchesGame(question, game)) {
+      const answer = memberPicks.pickem[question];
+      if (answer === game.awayTeam || answer === game.homeTeam) result.pick = answer;
+      break;
+    }
+  }
+  return result;
 }
 
 /**
@@ -6100,6 +6178,18 @@ function parseAllPicksFromSheet(sheet, memberData, asOf) {
   const commentsRegex = /comments/i;
   const pickemRegex = / at /i;
 
+  // Every matchup question this form ASKED, answered or not. A blank answer is never stored
+  // below, so without this list "left the question blank" and "was never asked the question
+  // at all" look identical downstream, and a locking pass would void both with N/A. Only
+  // the first is a real non-pick; the second means the form and the game plan disagree.
+  const askedQuestions = headers.filter(header => {
+    const question = header === null || header === undefined ? '' : header.toString();
+    if (commentsRegex.test(question)) return false;
+    if (survivorRegex.test(question) || eliminatorRegex.test(question)) return false;
+    if (tiebreakerRegex.test(question)) return false;
+    return pickemRegex.test(question);
+  });
+
   finalResponseRows.forEach(row => {
     const name = (nameCol === -1 || newUserAnswerRegex.test(row[nameCol])) ? row[newNameCol] : row[nameCol];
     const memberId = nameToIdMap[name.trim().toLowerCase()];
@@ -6113,6 +6203,7 @@ function parseAllPicksFromSheet(sheet, memberData, asOf) {
 
     const userPicks = {
       pickem: {},
+      questions: askedQuestions,
       survivor: null,
       eliminator: null,
       tiebreaker: null,

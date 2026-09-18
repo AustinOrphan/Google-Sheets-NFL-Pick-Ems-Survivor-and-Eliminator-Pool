@@ -237,12 +237,15 @@ describe('latePolicyPasses', () => {
     ]);
   });
 
-  it('game, after every kickoff, is one blank-filling pass per kickoff, ascending', () => {
+  it('game, after every kickoff, is one locking pass per kickoff, ascending', () => {
     const { latePolicyPasses } = load();
     const passes = latePolicyPasses('game', gamePlan, AFTER_ALL);
     assert.equal(passes.length, 3);
     assert.deepEqual(passes.map(p => p.asOf), [THU, SUN_EARLY, SUN_LATE]);
-    assert.ok(passes.every(p => p.fill === 'blanks'));
+    // 'lock', not 'blanks': every one of these cutoffs is a fixed instant in the past, so
+    // re-asserting the answer is idempotent. 'blanks' would skip the cell an earlier
+    // import's preview pass had already filled and lose the as-of-kickoff answer.
+    assert.ok(passes.every(p => p.fill === 'lock'));
     assert.deepEqual(passes[1].games.map(g => g.awayTeam).sort(), ['KC', 'SF']);
   });
 
@@ -252,7 +255,7 @@ describe('latePolicyPasses', () => {
     // Saturday would otherwise find Friday's value stuck in the grid.
     const friday = THU + 12 * 60 * 60 * 1000;
     const passes = latePolicyPasses('game', gamePlan, friday);
-    const locking = passes.filter(p => p.fill === 'blanks');
+    const locking = passes.filter(p => p.fill === 'lock');
     assert.deepEqual(locking.map(p => p.asOf), [THU]);
   });
 
@@ -343,7 +346,7 @@ describe('latePolicyPasses', () => {
       assert.equal(holding.length, 1, `${game.awayTeam} must be in exactly one pass`);
     });
     const kc = passesHolding(passes, 'KC', gamePlan.games)[0];
-    assert.equal(kc.fill, 'blanks');
+    assert.equal(kc.fill, 'lock');
     assert.equal(kc.asOf, SUN_EARLY);
   });
 
@@ -495,5 +498,386 @@ describe('latePickCellAction', () => {
   it('a cell already holding N/A is filled, so it is never rewritten', () => {
     const { latePickCellAction } = load();
     assert.equal(latePickCellAction('N/A', true, 'BUF', 'blanks'), 'skip');
+  });
+});
+
+describe('latePickCellAction lock fill', () => {
+  it('lock writes the pick over an existing value, so re-importing is idempotent', () => {
+    const { latePickCellAction } = load();
+    // The value already there is an earlier import's preview of what was then an unstarted
+    // game. 'blanks' would skip it and the as-of-kickoff answer would never land.
+    assert.equal(latePickCellAction('KC', true, 'BUF', 'lock'), 'write');
+  });
+
+  it('lock writes the pick into an empty cell', () => {
+    const { latePickCellAction } = load();
+    assert.equal(latePickCellAction('', true, 'BUF', 'lock'), 'write');
+  });
+
+  it('lock voids a started game the member never answered', () => {
+    const { latePickCellAction } = load();
+    assert.equal(latePickCellAction('', true, null, 'lock'), 'na');
+  });
+
+  it('lock re-voids a cell already holding N/A instead of reading it as filled', () => {
+    const { latePickCellAction } = load();
+    assert.equal(latePickCellAction('N/A', true, null, 'lock'), 'na');
+  });
+
+  it('lock leaves an UNSTARTED game alone rather than voiding it', () => {
+    const { latePickCellAction } = load();
+    assert.equal(latePickCellAction('', false, null, 'lock'), 'skip');
+    assert.equal(latePickCellAction('KC', false, null, 'lock'), 'skip');
+  });
+
+  it('lock overwrites a manual operator edit to a started game (accepted, and pinned)', () => {
+    const { latePickCellAction } = load();
+    // Under 'game' the next import re-asserts the answer as of that kickoff, so a hand edit
+    // does not survive. That is deliberate. A cell that can drift between imports is exactly
+    // the schedule dependence the 'lock' fill exists to remove, so do not "fix" this by
+    // making lock skip a filled cell: that is the bug it replaced.
+    assert.equal(latePickCellAction('NYJ', true, 'BUF', 'lock'), 'write');
+    assert.equal(latePickCellAction('NYJ', true, null, 'lock'), 'na');
+  });
+
+  it('freeze still fills blanks only, because its second cutoff moves with the clock', () => {
+    const { latePolicyPasses } = load();
+    const THU = Date.UTC(2026, 8, 17, 20, 15);
+    const plan = { games: [{ date: new Date(THU).toISOString(), awayTeam: 'NE', homeTeam: 'NYJ' }] };
+    const passes = latePolicyPasses('freeze', plan, THU + 1000);
+    // asOf 'now' means the answer this pass computes keeps changing, so re-writing it would
+    // let a member edit a pick that was supposed to be frozen. Only 'blanks' is safe there.
+    assert.equal(passes[passes.length - 1].fill, 'blanks');
+  });
+});
+
+describe('none reproduces today\'s behavior exactly', () => {
+  it('latePolicyPasses(none) is the single open pass whatever the week looks like', () => {
+    const { latePolicyPasses } = load();
+    const open = [{ asOf: null, games: null, fill: 'overwrite' }];
+    const plan = {
+      games: [
+        { date: '2026-09-17T20:15:00.000Z', awayTeam: 'NE', homeTeam: 'NYJ' },
+        { date: '', awayTeam: 'KC', homeTeam: 'BUF' },
+      ],
+    };
+    [0, Date.UTC(2026, 8, 17), Date.UTC(2030, 0, 1)].forEach(now => {
+      assert.deepEqual(latePolicyPasses('none', plan, now), open);
+      assert.deepEqual(latePolicyPasses(undefined, plan, now), open);
+    });
+  });
+
+  it('an overwrite pass never voids, for any cell value or scoreboard state', () => {
+    const { latePickCellAction } = load();
+    ['', null, undefined, 'KC', 'N/A', 0].forEach(cell => {
+      [true, false].forEach(started => {
+        assert.equal(latePickCellAction(cell, started, null, 'overwrite'), 'skip');
+        assert.equal(latePickCellAction(cell, started, 'BUF', 'overwrite'), 'write');
+      });
+    });
+  });
+});
+
+describe('pickForGame', () => {
+  const game = {
+    awayTeam: 'KC', homeTeam: 'BUF',
+    awayTeamName: 'Kansas City Chiefs', homeTeamName: 'Buffalo Bills',
+  };
+  const asked = ['Kansas City Chiefs at Buffalo Bills', 'Dallas Cowboys at Philadelphia Eagles'];
+
+  it('returns the answer when a question matched and it names one of the two teams', () => {
+    const { pickForGame } = load();
+    const picks = { questions: asked, pickem: { 'Kansas City Chiefs at Buffalo Bills': 'BUF' } };
+    assert.deepEqual(pickForGame(picks, game), { matched: true, pick: 'BUF' });
+  });
+
+  it('matched with no pick when the member was asked and left it blank', () => {
+    const { pickForGame } = load();
+    // parseAllPicksFromSheet stores nothing at all for a blank answer, so `questions` is
+    // the only evidence the member ever saw this matchup. N/A is correct for them.
+    const picks = { questions: asked, pickem: { 'Dallas Cowboys at Philadelphia Eagles': 'DAL' } };
+    assert.deepEqual(pickForGame(picks, game), { matched: true, pick: null });
+  });
+
+  it('NOT matched when no question on the form was about this matchup at all', () => {
+    const { pickForGame } = load();
+    // This is the case that must never become N/A: the member was never asked.
+    const picks = {
+      questions: ['Dallas Cowboys at Philadelphia Eagles'],
+      pickem: { 'Dallas Cowboys at Philadelphia Eagles': 'DAL' },
+    };
+    assert.deepEqual(pickForGame(picks, game), { matched: false, pick: null });
+  });
+
+  it('matched with no pick when the answer names neither team', () => {
+    const { pickForGame } = load();
+    const picks = { questions: asked, pickem: { 'Kansas City Chiefs at Buffalo Bills': 'MIA' } };
+    assert.deepEqual(pickForGame(picks, game), { matched: true, pick: null });
+  });
+
+  it('falls back to the answered questions when `questions` is absent', () => {
+    const { pickForGame } = load();
+    const picks = { pickem: { 'Kansas City Chiefs at Buffalo Bills': 'KC' } };
+    assert.deepEqual(pickForGame(picks, game), { matched: true, pick: 'KC' });
+  });
+
+  it('no submission at all is not a match, which is what keeps N/A working', () => {
+    const { pickForGame } = load();
+    assert.deepEqual(pickForGame(null, game), { matched: false, pick: null });
+    assert.deepEqual(pickForGame(undefined, game), { matched: false, pick: null });
+  });
+
+  it('a game missing its full team names matches nothing, rather than matching everything', () => {
+    const { pickForGame } = load();
+    // A bare truthiness check would match every question here; String.includes(undefined)
+    // would hunt for the literal text "undefined". Both are wrong, and silently so.
+    const picks = { questions: asked, pickem: { 'Kansas City Chiefs at Buffalo Bills': 'BUF' } };
+    assert.deepEqual(pickForGame(picks, { awayTeam: 'KC', homeTeam: 'BUF' }), { matched: false, pick: null });
+  });
+});
+
+describe('parseAllPicksFromSheet records the questions the form asked', () => {
+  const HEADERS = [
+    'Timestamp', 'Select Your Name',
+    'Kansas City Chiefs at Buffalo Bills',
+    'Dallas Cowboys at Philadelphia Eagles',
+    'Survivor Pick', 'Eliminator Pick',
+    'Tiebreaker: total points', 'Any comments?',
+  ];
+  const memberData = { members: { m1: { name: 'Alice' } }, memberOrder: ['m1'] };
+  const fakeSheet = (rows) => ({
+    getName: () => 'WK1',
+    getDataRange: () => ({ getValues: () => rows.map(r => r.slice()) }),
+  });
+
+  it('lists a matchup question the member left blank, which pickem alone cannot show', () => {
+    const { parseAllPicksFromSheet } = load();
+    const rows = [HEADERS, [new Date(Date.UTC(2026, 8, 16)), 'Alice', 'BUF', '', 'KC', 'NYJ', '44', 'hi']];
+    const picks = parseAllPicksFromSheet(fakeSheet(rows), memberData);
+    assert.equal(picks.m1.pickem['Dallas Cowboys at Philadelphia Eagles'], undefined);
+    assert.deepEqual(picks.m1.questions, [
+      'Kansas City Chiefs at Buffalo Bills',
+      'Dallas Cowboys at Philadelphia Eagles',
+    ]);
+  });
+
+  it('leaves the survivor, eliminator, tiebreaker and comments columns out of the list', () => {
+    const { parseAllPicksFromSheet } = load();
+    const rows = [HEADERS, [new Date(Date.UTC(2026, 8, 16)), 'Alice', 'BUF', 'PHI', 'KC', 'NYJ', '44', 'hi']];
+    const picks = parseAllPicksFromSheet(fakeSheet(rows), memberData);
+    assert.equal(picks.m1.questions.length, 2);
+    assert.ok(picks.m1.questions.every(q => / at /i.test(q)));
+  });
+});
+
+/**
+ * A stand-in for the grid loop of executePickImport.
+ *
+ * executePickImport itself needs SpreadsheetApp, named ranges and live scoreboard state, so
+ * it cannot run in this harness. This mirrors its pass loop and nothing else: the policy
+ * passes, the response parse, the question match and the per-cell decision are all the real
+ * functions out of picks.gs. Only the sheet plumbing is stood in for, and a game counts as
+ * started once its kickoff has passed.
+ *
+ * `fixture.submissions` rows are ordered [Date, name, ...answers] and are filtered by the
+ * simulated clock, so an import can only ever see what had actually been submitted by then.
+ * That detail is the whole point: a fixture that hands every row to every import cannot see
+ * the bug these tests exist to pin.
+ */
+function makeImportSimulator(fixture) {
+  const { gamePlan, headers, submissions, memberData, policy } = fixture;
+  const games = gamePlan.games;
+
+  const sheetAsOf = (now) => ({
+    getName: () => 'WK1',
+    getDataRange: () => ({
+      getValues: () => [headers.slice()].concat(
+        submissions.filter(row => row[0].getTime() <= now).map(row => row.slice())),
+    }),
+  });
+
+  const runImport = (grid, now) => {
+    const { latePolicyPasses, parseAllPicksFromSheet, pickForGame, latePickCellAction, kickoffMs } = load();
+    const sheet = sheetAsOf(now);
+    const noCutoff = parseAllPicksFromSheet(sheet, memberData);
+    latePolicyPasses(policy, gamePlan, now).forEach(pass => {
+      const passPicks = pass.asOf === null ? noCutoff : parseAllPicksFromSheet(sheet, memberData, pass.asOf);
+      const passGames = pass.games === null ? games : pass.games;
+      passGames.forEach(game => {
+        const colIndex = games.indexOf(game);
+        const gameStarted = kickoffMs(game) <= now;
+        memberData.memberOrder.forEach((memberId, rowIndex) => {
+          const memberPicks = passPicks[memberId] || null;
+          const { matched, pick } = pickForGame(memberPicks, game);
+          if (memberPicks && !matched) return;   // submitted, but never asked this matchup
+          const action = latePickCellAction(grid[rowIndex][colIndex], gameStarted, pick, pass.fill);
+          if (action === 'write') grid[rowIndex][colIndex] = pick;
+          else if (action === 'na') grid[rowIndex][colIndex] = 'N/A';
+        });
+      });
+    });
+    return grid;
+  };
+
+  const emptyGrid = () => memberData.memberOrder.map(() => games.map(() => ''));
+  return { runImport, emptyGrid };
+}
+
+describe('game policy does not depend on when the operator imports', () => {
+  const iso = (ms) => new Date(ms).toISOString();
+  const WED      = Date.UTC(2026, 8, 16, 18, 0);    // Alice's first submission
+  const THU_KICK = Date.UTC(2026, 8, 17, 20, 15);
+  const FRI      = Date.UTC(2026, 8, 18, 12, 0);
+  const SAT      = Date.UTC(2026, 8, 19, 18, 0);    // Alice's legal pick change
+  const SUN_KICK = Date.UTC(2026, 8, 20, 17, 0);
+  const MON_KICK = Date.UTC(2026, 8, 21, 20, 15);
+  const TUE      = Date.UTC(2026, 8, 22, 12, 0);
+
+  const games = [
+    { date: iso(THU_KICK), awayTeam: 'NE',  homeTeam: 'NYJ', awayTeamName: 'New England Patriots', homeTeamName: 'New York Jets' },
+    { date: iso(SUN_KICK), awayTeam: 'KC',  homeTeam: 'BUF', awayTeamName: 'Kansas City Chiefs',   homeTeamName: 'Buffalo Bills' },
+    { date: iso(MON_KICK), awayTeam: 'DAL', homeTeam: 'PHI', awayTeamName: 'Dallas Cowboys',       homeTeamName: 'Philadelphia Eagles' },
+  ];
+  const gamePlan = { games };
+
+  // Alice picks all three away sides on Wednesday, then legally switches to all three home
+  // sides on Saturday, before both the Sunday and the Monday game. Bob never submits at all.
+  const fixture = {
+    gamePlan,
+    policy: 'game',
+    headers: ['Timestamp', 'Select Your Name'].concat(games.map(g => `${g.awayTeamName} at ${g.homeTeamName}`)),
+    submissions: [
+      [new Date(WED), 'Alice', 'NE',  'KC',  'DAL'],
+      [new Date(SAT), 'Alice', 'NYJ', 'BUF', 'PHI'],
+    ],
+    memberData: { members: { m1: { name: 'Alice' }, m2: { name: 'Bob' } }, memberOrder: ['m1', 'm2'] },
+  };
+  const { runImport, emptyGrid } = makeImportSimulator(fixture);
+
+  // Every way an operator might realistically run the import through one week.
+  const SCHEDULES = {
+    'once, on Tuesday': [TUE],
+    'Wednesday, then Tuesday': [WED + 1000, TUE],
+    'after Thursday kickoff, then Tuesday': [THU_KICK + 1000, TUE],
+    'at every kickoff': [THU_KICK, SUN_KICK, MON_KICK, TUE],
+    'every day of the week': [WED + 1000, THU_KICK + 1000, FRI, SAT + 1000, SUN_KICK, MON_KICK, TUE],
+  };
+  const gridAfter = (times) => {
+    const grid = emptyGrid();
+    times.forEach(now => runImport(grid, now));
+    return grid;
+  };
+
+  it('every import schedule produces the same grid', () => {
+    // NE is Wednesday's answer, locked when Thursday kicked off before Alice changed it.
+    // BUF and PHI are Saturday's change, made before either of those games kicked off.
+    // Before the 'lock' fill this returned NE/KC/DAL, NE/KC/DAL and NE/KC/PHI for the
+    // last three schedules: the grid depended on when the operator happened to import.
+    Object.keys(SCHEDULES).forEach(name => {
+      assert.deepEqual(gridAfter(SCHEDULES[name])[0], ['NE', 'BUF', 'PHI'], `Alice, importing ${name}`);
+    });
+  });
+
+  it('a member who never submitted is voided once every game has started', () => {
+    Object.keys(SCHEDULES).forEach(name => {
+      assert.deepEqual(gridAfter(SCHEDULES[name])[1], ['N/A', 'N/A', 'N/A'], `Bob, importing ${name}`);
+    });
+  });
+
+  it('importing again changes nothing, however many times it runs', () => {
+    const grid = emptyGrid();
+    runImport(grid, TUE);
+    const once = grid.map(row => row.slice());
+    runImport(grid, TUE);
+    runImport(grid, TUE + 7 * 24 * 60 * 60 * 1000);
+    assert.deepEqual(grid, once);
+  });
+
+  it('an unstarted game stays changeable right up to its own kickoff', () => {
+    // The preview pass has to keep tracking the latest submission, or a member who changes
+    // a pick on Saturday after a Friday import would find Friday's value stuck.
+    const grid = emptyGrid();
+    runImport(grid, FRI);
+    assert.deepEqual(grid[0], ['NE', 'KC', 'DAL']);
+    runImport(grid, SAT + 1000);
+    assert.deepEqual(grid[0], ['NE', 'BUF', 'PHI']);
+  });
+
+  it('a manual edit to a started game is overwritten by the next import (accepted, pinned)', () => {
+    // Intended, and the direct price of schedule independence: the locking pass re-asserts
+    // the answer as of that kickoff every time it runs. Pinned so nobody "fixes" it by
+    // making 'lock' skip filled cells, which is precisely the bug it replaced.
+    const grid = emptyGrid();
+    runImport(grid, TUE);
+    grid[0][0] = 'NYJ';    // operator hand-edits one of Alice's locked cells
+    grid[1][2] = 'DAL';    // and hand-fills one of Bob's voided cells
+    runImport(grid, TUE);
+    assert.deepEqual(grid[0], ['NE', 'BUF', 'PHI']);
+    assert.deepEqual(grid[1], ['N/A', 'N/A', 'N/A']);
+  });
+
+  it('freeze, whose second cutoff moves, is left on the blank-filling rule', () => {
+    // freeze deliberately locks everyone at first kickoff and only fills blanks after, so
+    // its result is allowed to differ from 'game'. This pins that the fix did not leak.
+    const frozen = makeImportSimulator(Object.assign({}, fixture, { policy: 'freeze' }));
+    const grid = frozen.emptyGrid();
+    frozen.runImport(grid, TUE);
+    // Locked at first kickoff, so Saturday's change is discarded outright. That is freeze.
+    assert.deepEqual(grid[0], ['NE', 'KC', 'DAL']);
+  });
+});
+
+describe('a matchup the form never asked about is not voided', () => {
+  const iso = (ms) => new Date(ms).toISOString();
+  const WED      = Date.UTC(2026, 8, 16, 18, 0);
+  const THU_KICK = Date.UTC(2026, 8, 17, 20, 15);
+  const SUN_KICK = Date.UTC(2026, 8, 20, 17, 0);
+  const MON_KICK = Date.UTC(2026, 8, 21, 20, 15);
+  const TUE      = Date.UTC(2026, 8, 22, 12, 0);
+
+  const games = [
+    { date: iso(THU_KICK), awayTeam: 'NE',  homeTeam: 'NYJ', awayTeamName: 'New England Patriots', homeTeamName: 'New York Jets' },
+    { date: iso(SUN_KICK), awayTeam: 'KC',  homeTeam: 'BUF', awayTeamName: 'Kansas City Chiefs',   homeTeamName: 'Buffalo Bills' },
+    // Added to the game plan, or corrected, after the form went out: no question asks it.
+    { date: iso(MON_KICK), awayTeam: 'DAL', homeTeam: 'PHI', awayTeamName: 'Dallas Cowboys',       homeTeamName: 'Philadelphia Eagles' },
+  ];
+
+  const { runImport, emptyGrid } = makeImportSimulator({
+    gamePlan: { games },
+    policy: 'game',
+    headers: [
+      'Timestamp', 'Select Your Name',
+      'New England Patriots at New York Jets',
+      'Kansas City Chiefs at Buffalo Bills',
+    ],
+    submissions: [
+      [new Date(WED), 'Alice', 'NE', 'KC'],
+      [new Date(WED), 'Carol', 'NE', ''],   // asked the second question, left it blank
+    ],
+    memberData: {
+      members: { m1: { name: 'Alice' }, m2: { name: 'Carol' }, m3: { name: 'Bob' } },
+      memberOrder: ['m1', 'm2', 'm3'],
+    },
+  });
+
+  it('leaves the unasked matchup alone for everyone who submitted', () => {
+    const grid = emptyGrid();
+    runImport(grid, TUE);
+    // Alice answered both questions she was given. The third column is not hers to lose:
+    // before this fix a locking pass voided it with N/A for a question she never saw.
+    assert.deepEqual(grid[0], ['NE', 'KC', '']);
+  });
+
+  it('still voids a question that WAS asked and left blank', () => {
+    const grid = emptyGrid();
+    runImport(grid, TUE);
+    assert.deepEqual(grid[1], ['NE', 'N/A', '']);
+  });
+
+  it('still voids every game for a member who submitted nothing at all', () => {
+    const grid = emptyGrid();
+    runImport(grid, TUE);
+    // No submission is a real answer of "none", unlike a question that was never asked.
+    assert.deepEqual(grid[2], ['N/A', 'N/A', 'N/A']);
   });
 });
