@@ -42,6 +42,8 @@
     </div>
 
     <p id="stale-note" class="warn hidden">The chain appears to have stopped. Enabling again will run a check now and re-arm it.</p>
+    <p id="standdown-note" class="hidden">Stood down for the season. Nothing is scheduled, and that is expected. Enable again next season.</p>
+    <p id="owner-note" class="hidden">Managed by <span id="owner-email"></span>. Their triggers are not visible from this account, so status here is limited.</p>
 
     <div class="button-row">
       <button id="disable-btn" type="button" class="btn btn-secondary">Disable</button>
@@ -70,8 +72,13 @@
     }
 
     function render(s) {
-      const stale = s.enabled && !s.armed;
-      document.getElementById('s-state').textContent = s.enabled ? (s.armed ? 'Enabled and armed' : 'Enabled but NOT armed') : 'Disabled';
+      // Only the owner can see their own triggers, so "not armed" means nothing from another
+      // account - never show that account a stalled-chain warning it cannot act on.
+      const stale = s.enabled && !s.armed && !s.standDown && s.isOwner;
+      document.getElementById('s-state').textContent = !s.enabled ? 'Disabled'
+        : s.standDown ? 'Enabled, stood down for the season'
+        : !s.isOwner ? 'Enabled'
+        : s.armed ? 'Enabled and armed' : 'Enabled but NOT armed';
       document.getElementById('s-last').textContent = fmt(s.lastRun);
       document.getElementById('s-week').textContent = s.week || '-';
       document.getElementById('s-result').textContent = s.result ? `${s.result}${s.imported ? ` (${s.imported} imported)` : ''}` : '-';
@@ -83,6 +90,10 @@
       if (s.lastSelfHeal) { document.getElementById('s-heal').textContent = fmt(s.lastSelfHeal); healRow.classList.remove('hidden'); }
       else { healRow.classList.add('hidden'); }
       document.getElementById('stale-note').classList.toggle('hidden', !stale);
+      document.getElementById('standdown-note').classList.toggle('hidden', !(s.enabled && s.standDown));
+      document.getElementById('owner-note').classList.toggle('hidden', s.isOwner);
+      if (!s.isOwner) document.getElementById('owner-email').textContent = s.owner;
+      document.getElementById('enable-btn').classList.toggle('hidden', !s.isOwner);
       document.getElementById('enable-btn').textContent = s.enabled && s.armed ? 'Run check now' : 'Enable';
       document.getElementById('disable-btn').disabled = !s.enabled;
       document.getElementById('loading-overlay').classList.add('hidden');

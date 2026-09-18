@@ -5478,6 +5478,7 @@ function runOutcomesCheck(e) {
     if (fetched.week > REGULAR_SEASON) {
       summary.result = 'regular season complete';
       summary.detail = 'Playoff outcomes are not fetched automatically.';
+      summary.standDown = true;
       return;
     }
 
@@ -5508,8 +5509,16 @@ function runOutcomesCheck(e) {
     }
 
     nextCheck = computeNextCheckTime(collectOutstandingGames(fetched.analysis, fetched.week), new Date());
-    if (nextCheck === null && summary.result !== 'problem') {
-      summary.result = summary.imported > 0 ? 'imported; season complete' : 'season complete';
+    if (nextCheck === null && fetched.week >= REGULAR_SEASON) {
+      summary.standDown = true;
+      if (summary.result !== 'problem') {
+        summary.result = summary.imported > 0 ? 'imported; season complete' : 'season complete';
+      }
+    } else if (nextCheck === null) {
+      // Mid-season with nothing outstanding: next week's form has not been built yet, so its games
+      // are not in the candidate set. That is not the end of the season - check back in 12 hours.
+      nextCheck = new Date(Date.now() + 12 * 60 * 60 * 1000);
+      summary.detail = summary.detail || 'No games outstanding yet; waiting for the next week\'s form.';
     }
   } catch (err) {
     summary.result = 'error';
@@ -5521,6 +5530,7 @@ function runOutcomesCheck(e) {
   } finally {
     try {
       const enabled = docProps.getProperty(OUTCOME_FETCH_ENABLED_KEY) === 'true';
+      if (!summary.standDown) summary.standDown = false;
       summary.nextCheck = (nextCheck && enabled) ? nextCheck.toISOString() : null;
       recordOutcomeFetchStatus(summary);
       if (summary.nextCheck) armNextOutcomeCheck(nextCheck);
@@ -5549,13 +5559,28 @@ function countBlankOutcomes(ss, week) {
 }
 
 // Enable from the panel. Runs the first check immediately (user-initiated, so full auth), which
-// both imports anything currently missing and arms the chain from real game statuses.
+// both imports anything currently missing and arms the chain from real game statuses. Also
+// installs the self-heal trigger so a dead chain recovers on the next open.
 function enableOutcomeAutoFetch() {
   PropertiesService.getDocumentProperties().setProperty(OUTCOME_FETCH_ENABLED_KEY, 'true');
+  // Triggers belong to the user who creates them, and getProjectTriggers only ever returns your
+  // own. Recording who enabled it lets the panel tell a co-editor the chain is someone else's
+  // rather than showing them an empty trigger list and calling it a stalled chain.
+  recordOutcomeFetchStatus({ owner: outcomeFetchCurrentUser(), standDown: false });
   installOutcomeFetchOpenTrigger();
   runOutcomesCheck({});
   const status = readOutcomeFetchStatus();
   return { success: true, nextCheck: status.nextCheck || null };
+}
+
+// Returns '' when Apps Script will not disclose the address (some sharing configurations), which
+// callers must treat as "unknown", never as "a different user".
+function outcomeFetchCurrentUser() {
+  try {
+    return Session.getEffectiveUser().getEmail() || '';
+  } catch (err) {
+    return '';
+  }
 }
 
 // Disable from the panel. Takes the same script lock runOutcomesCheck holds for its whole body,
@@ -5604,6 +5629,9 @@ function getOutcomeAutoFetchStatus() {
     detail: status.detail || '',
     nextCheck: status.nextCheck || null,
     lastSelfHeal: status.lastSelfHeal || null,
+    standDown: status.standDown === true,
+    owner: status.owner || null,
+    isOwner: !status.owner || !outcomeFetchCurrentUser() || status.owner === outcomeFetchCurrentUser(),
   };
 }
 
@@ -5663,6 +5691,9 @@ function onOutcomeFetchOpen(e) {
   if (docProps.getProperty(OUTCOME_FETCH_ENABLED_KEY) !== 'true') return;
   const armed = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === OUTCOME_FETCH_HANDLER);
   if (armed) return;
+  // A deliberate stand-down is not a dead chain. Without this, every open for the rest of the
+  // offseason would run a full check - two HTTP calls and a full parse - to reach the same answer.
+  if (readOutcomeFetchStatus().standDown) return;
   Logger.log('🩺 Outcome auto-fetch chain was dead on open; re-arming.');
   runOutcomesCheck({});
   // Recorded AFTER the run: runOutcomesCheck rewrites the whole summary, detail included, so
