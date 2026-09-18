@@ -37,14 +37,14 @@ describe('computeNextCheckTime', () => {
     assert.ok(next.getTime() > NOW.getTime() + OUTCOME_FETCH_CLAMP_MS, 'must not clamp when candidate is comfortably ahead');
   });
 
-  it('a completed game is excluded even when its kickoff is latest', () => {
+  it('a completed game is excluded even when its kickoff is earliest', () => {
     const { computeNextCheckTime, OUTCOME_FETCH_GAME_FLOOR_MS } = load();
     const games = [
-      { kickoff: at(1), status: 'pregame' },
-      { kickoff: at(3), status: 'complete' },
+      { kickoff: at(1), status: 'complete' },
+      { kickoff: at(3), status: 'pregame' },
     ];
     const next = computeNextCheckTime(games, NOW);
-    assert.equal(next.getTime(), at(1) + OUTCOME_FETCH_GAME_FLOOR_MS);
+    assert.equal(next.getTime(), at(3) + OUTCOME_FETCH_GAME_FLOOR_MS);
   });
 
   it('all games complete returns null (stand down)', () => {
