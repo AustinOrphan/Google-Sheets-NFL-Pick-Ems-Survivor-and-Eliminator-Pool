@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body { font-family: 'Montserrat', Arial, sans-serif; padding: 20px; }
+    h3 { color: #013369; margin-top: 0; }
+    p { font-size: 13px; color: #555; line-height: 1.5; }
+    .hidden { display: none !important; }
+    .status { background: #f8f9fa; border: 1px solid #e8eaed; border-radius: 8px; padding: 12px; font-size: 13px; margin: 16px 0; }
+    .status div { margin: 4px 0; }
+    .status strong { display: inline-block; min-width: 110px; color: #013369; }
+    .warn { color: #D50A0A; font-weight: 600; }
+    .button-row { display: flex; gap: 8px; margin-top: 24px; border-top: 1px solid #eee; padding-top: 20px; }
+    .btn { flex: 1; padding: 8px 14px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: 600; }
+    .btn-primary { background-color: #013369; color: white; }
+    .btn-primary:hover { background-color: #2067b3; }
+    .btn-primary:disabled { background-color: #bababa; cursor: not-allowed; }
+    .btn-secondary { background-color: #D50A0A; color: white; }
+    .btn-secondary:hover { background-color: #ff3d3d; }
+    .btn-secondary:disabled { background-color: #bababa; cursor: not-allowed; }
+    #loading-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(255,255,255,0.8); display: flex; justify-content: center; align-items: center; z-index: 10; }
+    .spinner { border: 5px solid #f3f3f3; border-top: 5px solid #013369; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="loading-overlay"><div class="spinner"></div></div>
+
+  <div id="content" class="hidden">
+    <h3>Outcome Auto-Fetch</h3>
+    <p>Imports completed game outcomes on their own shortly after games finish, then updates Survivor and Eliminator. It checks only when a game could plausibly have ended, so it costs almost nothing between slates. Filled-in outcomes are never overwritten.</p>
+
+    <div class="status">
+      <div><strong>Status:</strong> <span id="s-state">-</span></div>
+      <div><strong>Last run:</strong> <span id="s-last">-</span></div>
+      <div><strong>Week:</strong> <span id="s-week">-</span></div>
+      <div><strong>Result:</strong> <span id="s-result">-</span></div>
+      <div><strong>Next check:</strong> <span id="s-next">-</span></div>
+      <div id="s-detail-row" class="hidden"><strong>Detail:</strong> <span id="s-detail"></span></div>
+    </div>
+
+    <p id="stale-note" class="warn hidden">The chain appears to have stopped. Enabling again will run a check now and re-arm it.</p>
+
+    <div class="button-row">
+      <button id="disable-btn" type="button" class="btn btn-secondary">Disable</button>
+      <button id="enable-btn" type="button" class="btn btn-primary">Enable</button>
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      document.getElementById('enable-btn').addEventListener('click', handleEnable);
+      document.getElementById('disable-btn').addEventListener('click', handleDisable);
+      refresh();
+    });
+
+    function refresh() {
+      google.script.run
+        .withSuccessHandler(render)
+        .withFailureHandler(err => alert(err.message))
+        .getOutcomeAutoFetchStatus();
+    }
+
+    function fmt(iso) {
+      if (!iso) return '-';
+      const d = new Date(iso);
+      return isNaN(d) ? iso : d.toLocaleString();
+    }
+
+    function render(s) {
+      const stale = s.enabled && !s.armed;
+      document.getElementById('s-state').textContent = s.enabled ? (s.armed ? 'Enabled and armed' : 'Enabled but NOT armed') : 'Disabled';
+      document.getElementById('s-last').textContent = fmt(s.lastRun);
+      document.getElementById('s-week').textContent = s.week || '-';
+      document.getElementById('s-result').textContent = s.result ? `${s.result}${s.imported ? ` (${s.imported} imported)` : ''}` : '-';
+      document.getElementById('s-next').textContent = s.armed ? fmt(s.nextCheck) : '-';
+      const detailRow = document.getElementById('s-detail-row');
+      if (s.detail) { document.getElementById('s-detail').textContent = s.detail; detailRow.classList.remove('hidden'); }
+      else { detailRow.classList.add('hidden'); }
+      document.getElementById('stale-note').classList.toggle('hidden', !stale);
+      document.getElementById('enable-btn').textContent = s.enabled && s.armed ? 'Run check now' : 'Enable';
+      document.getElementById('disable-btn').disabled = !s.enabled;
+      document.getElementById('loading-overlay').classList.add('hidden');
+      document.getElementById('content').classList.remove('hidden');
+    }
+
+    function busy(on) {
+      document.getElementById('loading-overlay').classList.toggle('hidden', !on);
+      document.getElementById('enable-btn').disabled = on;
+      document.getElementById('disable-btn').disabled = on;
+    }
+
+    function handleEnable() {
+      busy(true);
+      google.script.run
+        .withSuccessHandler(() => refresh())
+        .withFailureHandler(err => { alert(err.message); refresh(); })
+        .enableOutcomeAutoFetch();
+    }
+
+    function handleDisable() {
+      if (!confirm('Disable outcome auto-fetch?')) return;
+      busy(true);
+      google.script.run
+        .withSuccessHandler(() => refresh())
+        .withFailureHandler(err => { alert(err.message); refresh(); })
+        .disableOutcomeAutoFetch();
+    }
+  </script>
+</body>
+</html>

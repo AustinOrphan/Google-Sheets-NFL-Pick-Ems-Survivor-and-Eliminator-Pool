@@ -167,7 +167,8 @@ function onOpen() {
 
       // --- 🧙 AUTOMATION SUBMENU ---
       let subMenu = ui.createMenu('🧙 Automation')
-        .addItem('📡 Spread Auto-Fetch Panel', 'showAutoFetchPanel');
+        .addItem('📡 Spread Auto-Fetch Panel', 'showAutoFetchPanel')
+        .addItem('🏈 Outcome Auto-Fetch Panel', 'showOutcomeAutoFetchPanel');
       if (contest) {
         subMenu.addItem(`✅ Enable ${survElimIcons} Triggers`, 'createOnEditTrigger')
                .addItem(`⭕ Disable ${survElimIcons} Triggers`, 'deleteOnEditTrigger');
@@ -180,6 +181,7 @@ function onOpen() {
         .addItem('📊 Update Spread Data', 'fetchLatestSpreadsForWeek'));
     }
 
+    warnIfOutcomeFetchStale(docProps);
     menu.addSeparator()
         .addItem('❔ Help & Support', 'showSupportDialog')
         .addToUi();
@@ -5600,6 +5602,30 @@ function getOutcomeAutoFetchStatus() {
     detail: status.detail || '',
     nextCheck: status.nextCheck || null,
   };
+}
+
+function showOutcomeAutoFetchPanel() {
+  const html = HtmlService.createHtmlOutputFromFile('outcomeFetchPanel')
+      .setWidth(460)
+      .setHeight(420);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Outcome Auto-Fetch');
+}
+
+// Called from onOpen, which is a simple trigger and therefore cannot inspect triggers, fetch, or
+// re-arm. It can read properties and toast, so it warns when the planned next check is well in
+// the past - the signature of a chain that died. The fix lives in the panel, where a click has
+// full authorization.
+function warnIfOutcomeFetchStale(docProps) {
+  if (docProps.getProperty(OUTCOME_FETCH_ENABLED_KEY) !== 'true') return;
+  const status = readOutcomeFetchStatus();
+  if (!status.nextCheck) return;
+  const planned = new Date(status.nextCheck).getTime();
+  const graceMs = 60 * 60 * 1000;
+  if (isFinite(planned) && Date.now() - planned > graceMs) {
+    SpreadsheetApp.getActiveSpreadsheet().toast(
+      'Outcome auto-fetch looks stalled. Open Automation > Outcome Auto-Fetch to re-arm it.',
+      '🏈 AUTO-FETCH', 10);
+  }
 }
 
 /**
