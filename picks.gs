@@ -5391,8 +5391,8 @@ function deleteOutcomeFetchTriggers() {
   let removed = 0;
   ScriptApp.getProjectTriggers().forEach(trigger => {
     if (trigger.getHandlerFunction() === OUTCOME_FETCH_HANDLER) {
-      docProps.deleteProperty('triggerMeta_' + trigger.getUniqueId());
       ScriptApp.deleteTrigger(trigger);
+      docProps.deleteProperty('triggerMeta_' + trigger.getUniqueId());
       removed++;
     }
   });
