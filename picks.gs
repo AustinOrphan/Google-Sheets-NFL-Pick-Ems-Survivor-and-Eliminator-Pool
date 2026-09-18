@@ -3774,6 +3774,11 @@ function executeFormLock(e) {
     deleteTriggerById(triggerId);
     docProps.deleteProperty('triggerMeta_' + triggerId);
 
+    // A locked form receives no submissions, so its auto-sync trigger can never fire again.
+    // Removing it here keeps this path in step with toggleFormStatus, which already pairs the
+    // lock state with the trigger. Unlocking recreates it.
+    setFormSubmitTrigger(formId, false);
+
     Logger.log(`✅ Successfully executed and deleted one-time lock trigger for form ID: ${formId}`);
   } catch (err) {
     Logger.log(`⚠️ Failed to execute lock for form ID ${formId}. Error: ${err.toString()}`);
