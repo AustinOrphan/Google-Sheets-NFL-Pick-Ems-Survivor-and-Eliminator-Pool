@@ -6368,8 +6368,14 @@ function updateSurvElimSheet(ss, config, memberData, contestType) {
   
   if (!sheet) {
     const text = `❗ '${sheetName}' sheet not found, creating it now...`;
-    const ui = SpreadsheetApp.getUi();
-    ui.alert(`⭐ CREATING ${contestType.toUpperCase()} SHEET`, text, ui.ButtonSet.OK);
+    try {
+      const ui = SpreadsheetApp.getUi();
+      ui.alert(`⭐ CREATING ${contestType.toUpperCase()} SHEET`, text, ui.ButtonSet.OK);
+    } catch (err) {
+      // No UI when running from a trigger. Creating the sheet below is the actual remedy, so it
+      // must not be skipped just because nobody was there to be told about it.
+      Logger.log(`${text} (no UI to alert, ${err.message})`);
+    }
     sheet = survElimSheet(ss, null, null, contestType);
   }
 
