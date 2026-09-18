@@ -5785,6 +5785,113 @@ function updateOutcomeSheetVisibility(config) {
 
 
 /**
+ * A game's kickoff as epoch milliseconds.
+ *
+ * gamePlan stores `date` as an ISO-8601 STRING, not a number: analyzeScheduleData converts
+ * the schedule sheet's Date cell with value.toISOString() (picks.gs:4100-4101, where dateCol
+ * is headers.indexOf('date') at picks.gs:4087) and saveProperties JSON.stringifies it. Every
+ * consumer re-parses it, e.g. `new Date(game.date)` at picks.gs:3798.
+ *
+ * Accepts a string, a Date or a number so a hand-edited property cannot break the feature.
+ * @returns {number} epoch ms, or NaN when there is no usable kickoff.
+ */
+function kickoffMs(game) {
+  if (!game || game.date === null || game.date === undefined || game.date === '') return NaN;
+  if (game.date instanceof Date) return game.date.getTime();
+  if (typeof game.date === 'number') return isFinite(game.date) ? game.date : NaN;
+  return Date.parse(game.date);
+}
+
+/**
+ * Every distinct kickoff time in a week, ascending. Games sharing a kickoff share a lock.
+ */
+function distinctKickoffs(gamePlan) {
+  const games = (gamePlan && gamePlan.games) || [];
+  const times = new Set();
+  games.forEach(game => {
+    const kickoff = kickoffMs(game);
+    if (isFinite(kickoff)) times.add(kickoff);
+  });
+  return [...times].sort((a, b) => a - b);
+}
+
+/**
+ * The games that start at exactly this kickoff time.
+ */
+function gamesStartingAt(gamePlan, kickoff) {
+  const games = (gamePlan && gamePlan.games) || [];
+  return games.filter(game => kickoffMs(game) === kickoff);
+}
+
+/**
+ * The games whose kickoff is still in the future. Nothing about them is locked yet.
+ */
+function gamesAfter(gamePlan, when) {
+  const games = (gamePlan && gamePlan.games) || [];
+  return games.filter(game => {
+    const kickoff = kickoffMs(game);
+    return isFinite(kickoff) && kickoff > when;
+  });
+}
+
+/**
+ * Turns a policy name into the passes the importer should run, in order.
+ * A pass is { asOf, games, fill }: parse responses with that cutoff, write those games
+ * (null means all of them), overwriting or filling blanks only.
+ *
+ * A week with no usable kickoff times cannot express any policy, so it falls back to
+ * today's behavior rather than voiding anything.
+ */
+function latePolicyPasses(policy, gamePlan, now) {
+  const openPass = [{ asOf: null, games: null, fill: 'overwrite' }];
+  const resolved = resolveLatePolicy(policy);
+  const kickoffs = distinctKickoffs(gamePlan);
+  if (resolved === 'none' || kickoffs.length === 0) return openPass;
+
+  const firstKickoff = kickoffs[0];
+  if (resolved === 'close') {
+    return [{ asOf: firstKickoff, games: null, fill: 'overwrite' }];
+  }
+  if (resolved === 'freeze') {
+    // Everyone who submitted before kickoff is written first and is then untouchable,
+    // because the second pass only fills cells that are still blank.
+    return [
+      { asOf: firstKickoff, games: null, fill: 'overwrite' },
+      { asOf: now, games: null, fill: 'blanks' },
+    ];
+  }
+  // 'game': only a kickoff that has ALREADY passed locks anything. Running an import at
+  // 11am must not freeze the 1pm games, or a member who changes their pick at 12:30 would
+  // find the 11am value stuck. Games still to come get one overwriting pass instead, so
+  // the grid previews them live and they stay changeable right up to their own kickoff.
+  const passes = [];
+  kickoffs.forEach(kickoff => {
+    if (kickoff <= now) {
+      passes.push({ asOf: kickoff, games: gamesStartingAt(gamePlan, kickoff), fill: 'blanks' });
+    }
+  });
+  const upcoming = gamesAfter(gamePlan, now);
+  if (upcoming.length > 0) passes.push({ asOf: null, games: upcoming, fill: 'overwrite' });
+  return passes.length > 0 ? passes : openPass;
+}
+
+/**
+ * The cutoff for the tiebreaker, which follows its own game's kickoff rather than the
+ * week's. Without this, a member submitting after the final game began could enter the
+ * actual score. Returns null when there is no policy or no usable kickoff, which means
+ * "no cutoff" and reproduces today's behavior.
+ */
+function tiebreakerCutoff(policy, gamePlan) {
+  if (resolveLatePolicy(policy) === 'none') return null;
+  const games = (gamePlan && gamePlan.games) || [];
+  if (games.length === 0) return null;
+  const tbIndex = games.findIndex(game => game && game.tiebreaker);
+  const game = tbIndex === -1 ? games[games.length - 1] : games[tbIndex];
+  const kickoff = kickoffMs(game);
+  return isFinite(kickoff) ? kickoff : null;
+}
+
+/**
  * The four late-submission policies. Order is the order shown in the Configuration panel.
  */
 const LATE_POLICIES = ['none', 'close', 'freeze', 'game'];
