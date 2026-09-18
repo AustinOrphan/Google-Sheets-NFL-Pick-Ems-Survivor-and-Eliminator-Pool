@@ -5785,6 +5785,35 @@ function updateOutcomeSheetVisibility(config) {
 
 
 /**
+ * The four late-submission policies. Order is the order shown in the Configuration panel.
+ */
+const LATE_POLICIES = ['none', 'close', 'freeze', 'game'];
+
+/**
+ * Locates the form's submission-time column. Google writes a "Timestamp" header for a
+ * spreadsheet-destination form, but the fallback covers a renamed header.
+ * @returns {number} Column index, or -1 when no usable timestamp column exists.
+ */
+function findTimestampColumn(headers, sampleRow) {
+  const timestampRegex = /^timestamp$/i;
+  const headerRow = headers || [];
+  for (let i = 0; i < headerRow.length; i++) {
+    const header = headerRow[i];
+    if (header === null || header === undefined) continue;
+    if (timestampRegex.test(header.toString().trim())) return i;
+  }
+  if (sampleRow && sampleRow[0] instanceof Date) return 0;
+  return -1;
+}
+
+/**
+ * An unrecognized or absent value means "no policy", which is today's behavior.
+ */
+function resolveLatePolicy(value) {
+  return LATE_POLICIES.indexOf(value) === -1 ? 'none' : value;
+}
+
+/**
  * Reads a raw form response sheet, de-duplicates to "last
  * submission wins", and parses all pick types into a clean, structured object.
  * This is a read-only operation and does not modify any properties.
