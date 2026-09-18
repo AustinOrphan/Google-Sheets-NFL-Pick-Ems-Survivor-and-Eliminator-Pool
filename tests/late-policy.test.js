@@ -309,3 +309,46 @@ describe('tiebreakerCutoff', () => {
     assert.equal(tiebreakerCutoff('game', { games: [{ date: 'soon' }] }), null);
   });
 });
+
+describe('latePickCellAction', () => {
+  it('overwrite mode writes a pick over an existing value (today\'s behavior)', () => {
+    const { latePickCellAction } = load();
+    assert.equal(latePickCellAction('KC', false, 'BUF', 'overwrite'), 'write');
+  });
+
+  it('overwrite mode never writes N/A', () => {
+    const { latePickCellAction } = load();
+    assert.equal(latePickCellAction('', true, null, 'overwrite'), 'skip');
+  });
+
+  it('blanks mode leaves a filled cell alone, which is what locks a pick', () => {
+    const { latePickCellAction } = load();
+    assert.equal(latePickCellAction('KC', true, 'BUF', 'blanks'), 'skip');
+  });
+
+  it('blanks mode writes a pick into an empty cell', () => {
+    const { latePickCellAction } = load();
+    assert.equal(latePickCellAction('', true, 'BUF', 'blanks'), 'write');
+  });
+
+  it('blanks mode writes N/A for a started game with no pick', () => {
+    const { latePickCellAction } = load();
+    assert.equal(latePickCellAction('', true, null, 'blanks'), 'na');
+  });
+
+  it('blanks mode leaves an UNSTARTED game blank rather than voiding it', () => {
+    const { latePickCellAction } = load();
+    assert.equal(latePickCellAction('', false, null, 'blanks'), 'skip');
+  });
+
+  it('treats null and undefined cells as empty, like the empty string', () => {
+    const { latePickCellAction } = load();
+    assert.equal(latePickCellAction(null, true, null, 'blanks'), 'na');
+    assert.equal(latePickCellAction(undefined, true, 'BUF', 'blanks'), 'write');
+  });
+
+  it('a cell already holding N/A is filled, so it is never rewritten', () => {
+    const { latePickCellAction } = load();
+    assert.equal(latePickCellAction('N/A', true, 'BUF', 'blanks'), 'skip');
+  });
+});

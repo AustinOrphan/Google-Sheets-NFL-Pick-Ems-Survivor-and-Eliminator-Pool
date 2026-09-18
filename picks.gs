@@ -5876,6 +5876,24 @@ function latePolicyPasses(policy, gamePlan, now) {
 }
 
 /**
+ * Decides what to do with one member's cell for one game.
+ * @param {*} currentValue What the sheet holds today. Anything non-empty means "locked".
+ * @param {boolean} gameStarted Live scoreboard state, not clock arithmetic.
+ * @param {string|null} pick The member's pick as of this pass's cutoff, or null.
+ * @param {string} fill 'overwrite' or 'blanks'.
+ * @returns {string} 'skip', 'write' or 'na'
+ */
+function latePickCellAction(currentValue, gameStarted, pick, fill) {
+  const isFilled = currentValue !== '' && currentValue !== null && currentValue !== undefined;
+  if (fill === 'blanks' && isFilled) return 'skip';
+  if (pick) return 'write';
+  // Only a started game can be voided, and only in a blank-filling pass. An unstarted
+  // game with no pick is simply still open.
+  if (fill === 'blanks' && gameStarted) return 'na';
+  return 'skip';
+}
+
+/**
  * The cutoff for the tiebreaker, which follows its own game's kickoff rather than the
  * week's. Without this, a member submitting after the final game began could enter the
  * actual score. Returns null when there is no policy or no usable kickoff, which means
