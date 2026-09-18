@@ -5380,6 +5380,54 @@ function fetchCompletedGames(week) {
   };
 }
 
+const OUTCOME_FETCH_HANDLER = 'runOutcomesCheck';
+const OUTCOME_FETCH_ENABLED_KEY = 'outcomeAutoFetchEnabled';
+const OUTCOME_FETCH_STATUS_KEY = 'outcomeAutoFetchStatus';
+
+// Removes every trigger for the handler and its stored metadata. Called before arming, so there
+// is never more than one link in the chain, and by disable.
+function deleteOutcomeFetchTriggers() {
+  const docProps = PropertiesService.getDocumentProperties();
+  let removed = 0;
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    if (trigger.getHandlerFunction() === OUTCOME_FETCH_HANDLER) {
+      docProps.deleteProperty('triggerMeta_' + trigger.getUniqueId());
+      ScriptApp.deleteTrigger(trigger);
+      removed++;
+    }
+  });
+  return removed;
+}
+
+// Arms exactly one one-time trigger at `date`, mirroring setOneTimeFormLockTrigger. Records the
+// planned time so the panel and onOpen can tell whether the chain is alive.
+function armNextOutcomeCheck(date) {
+  deleteOutcomeFetchTriggers();
+  const trigger = ScriptApp.newTrigger(OUTCOME_FETCH_HANDLER)
+    .timeBased()
+    .at(date)
+    .create();
+  const docProps = PropertiesService.getDocumentProperties();
+  docProps.setProperty('triggerMeta_' + trigger.getUniqueId(), JSON.stringify({ purpose: 'outcomeAutoFetch', plannedFor: date.toISOString() }));
+  recordOutcomeFetchStatus({ nextCheck: date.toISOString() });
+  Logger.log(`⏰ Outcome auto-fetch armed for ${date.toISOString()}`);
+  return trigger.getUniqueId();
+}
+
+function readOutcomeFetchStatus() {
+  const raw = PropertiesService.getDocumentProperties().getProperty(OUTCOME_FETCH_STATUS_KEY);
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch (err) { return {}; }
+}
+
+// Merges `patch` into the stored status. Kept as a merge so a run can record nextCheck in
+// finally without clobbering the import summary it wrote moments earlier.
+function recordOutcomeFetchStatus(patch) {
+  const merged = Object.assign(readOutcomeFetchStatus(), patch || {});
+  PropertiesService.getDocumentProperties().setProperty(OUTCOME_FETCH_STATUS_KEY, JSON.stringify(merged));
+  return merged;
+}
+
 /**
  * The main data-gathering function for the Import Picks panel.
  * This is called by the client-side script on load.
