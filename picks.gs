@@ -820,6 +820,7 @@ function processConfigurationSubmission(formObject) {
 
       'membershipLocked',
       'kickoffLock', // General options below
+      'latePolicy',
       // 'playoffsExclude',
       'hideEmojis',
       'initialized',
