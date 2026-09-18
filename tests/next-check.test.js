@@ -88,3 +88,49 @@ describe('computeNextCheckTime', () => {
     assert.equal(a, b);
   });
 });
+
+describe('collectOutstandingGames', () => {
+  const g = (date, extra) => Object.assign({ date, shortName: 'A @ B', homeScore: 0, awayScore: 0, winner: null }, extra);
+
+  it('flattens every status bucket of the current week with the bucket name as status', () => {
+    const { collectOutstandingGames } = load();
+    const analysis = {
+      '3': { pregame: [g(100)], active: [g(200)], postponed: [g(300)], complete: [g(400)], unknown: [g(500)] },
+    };
+    const out = collectOutstandingGames(analysis, 3);
+    const byKick = Object.fromEntries(out.map(x => [x.kickoff, x.status]));
+    assert.deepEqual(byKick, { 100: 'pregame', 200: 'active', 300: 'postponed', 400: 'complete', 500: 'unknown' });
+  });
+
+  it('includes the following week so rollover needs no special rule', () => {
+    const { collectOutstandingGames } = load();
+    const analysis = {
+      '3': { pregame: [], active: [], postponed: [], complete: [g(100)], unknown: [] },
+      '4': { pregame: [g(900)], active: [], postponed: [], complete: [], unknown: [] },
+    };
+    const out = collectOutstandingGames(analysis, 3);
+    assert.ok(out.some(x => x.kickoff === 900 && x.status === 'pregame'));
+  });
+
+  it('does not look past the regular season', () => {
+    const { collectOutstandingGames, REGULAR_SEASON } = load();
+    const analysis = {};
+    analysis[String(REGULAR_SEASON)] = { pregame: [], active: [], postponed: [], complete: [g(100)], unknown: [] };
+    analysis[String(REGULAR_SEASON + 1)] = { pregame: [g(900)], active: [], postponed: [], complete: [], unknown: [] };
+    const out = collectOutstandingGames(analysis, REGULAR_SEASON);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].kickoff, 100);
+  });
+
+  it('tolerates a missing week and a missing bucket', () => {
+    const { collectOutstandingGames } = load();
+    const analysis = { '3': { active: [g(200)] } };
+    const out = collectOutstandingGames(analysis, 3);
+    assert.deepEqual(out, [{ kickoff: 200, status: 'active' }]);
+  });
+
+  it('returns an empty array for a null analysis', () => {
+    const { collectOutstandingGames } = load();
+    assert.deepEqual(collectOutstandingGames(null, 3), []);
+  });
+});

@@ -5343,7 +5343,42 @@ function computeNextCheckTime(games, now) {
   return new Date(earliest > floor ? earliest : floor);
 }
 
+// Pure. Flattens the importer's analysis for `week` and the week after into the shape
+// computeNextCheckTime takes. Looking one week ahead is what makes rollover fall out of the
+// formula instead of needing its own rule. Never looks past the regular season.
+function collectOutstandingGames(analysis, week) {
+  const out = [];
+  if (!analysis) return out;
+  const buckets = ['pregame', 'active', 'postponed', 'complete', 'unknown'];
+  const last = Math.min(week + 1, REGULAR_SEASON);
+  for (let w = week; w <= last; w++) {
+    const wk = analysis[String(w)];
+    if (!wk) continue;
+    buckets.forEach(status => {
+      (wk[status] || []).forEach(game => {
+        if (!game) return;
+        out.push({ kickoff: game.date, status: status });
+      });
+    });
+  }
+  return out;
+}
 
+// The only function that touches ESPN. Swapping the data source later (scoreboard endpoint with
+// seasontype, for playoff support) means changing this and nothing else. Throws on API failure so
+// the trigger fails visibly and Apps Script emails the owner.
+function fetchCompletedGames(week) {
+  const data = getScoreImportData();
+  const resolvedWeek = week || data.week;
+  if (!resolvedWeek) throw new Error('Could not determine the current week from the API.');
+  const wk = data.analysis[String(resolvedWeek)] || {};
+  return {
+    week: resolvedWeek,
+    completed: wk.complete || [],
+    analysis: data.analysis,
+    formsData: data.formsData,
+  };
+}
 
 /**
  * The main data-gathering function for the Import Picks panel.
