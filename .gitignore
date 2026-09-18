@@ -1,0 +1,10 @@
+# local working files and agent workflow scaffolding - never upstream
+# docs/ is scratch in this repo: no branch has ever tracked a file under it.
+docs/
+.superpowers/
+
+# clasp config - holds the Apps Script project ID of a personal spreadsheet
+.clasp.json
+
+# node
+node_modules/
