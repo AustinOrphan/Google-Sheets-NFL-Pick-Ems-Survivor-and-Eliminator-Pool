@@ -5316,6 +5316,33 @@ function deleteWeeklyFetchTrigger() {
   return { success: true };
 }
 
+// ============================================================================================
+// OUTCOME AUTO-FETCH
+// A self-scheduling chain of one-time triggers. Each run imports completed outcomes into blank
+// cells, grades Survivor/Eliminator, records status, and then arms the next check. The next
+// check is always the earliest moment an outstanding game could plausibly have finished.
+// ============================================================================================
+
+const OUTCOME_FETCH_GAME_FLOOR_MS = 165 * 60 * 1000; // 2h45m: shortest realistic game, not the typical one
+const OUTCOME_FETCH_CLAMP_MS = 15 * 60 * 1000;      // never re-check sooner than this
+
+// Pure. games: [{ kickoff: msEpoch, status }], now: Date. Returns the next Date to check, or null
+// to stand down. Completion is decided by status, never by the clock; the clock only decides when
+// to look. Malformed entries are skipped so one bad record cannot stop the chain.
+function computeNextCheckTime(games, now) {
+  const nowMs = now.getTime();
+  let earliest = null;
+  (games || []).forEach(game => {
+    if (!game || typeof game.kickoff !== 'number' || !isFinite(game.kickoff)) return;
+    if (game.status === 'complete') return;
+    const candidate = game.kickoff + OUTCOME_FETCH_GAME_FLOOR_MS;
+    if (earliest === null || candidate < earliest) earliest = candidate;
+  });
+  if (earliest === null) return null;
+  const floor = nowMs + OUTCOME_FETCH_CLAMP_MS;
+  return new Date(earliest > floor ? earliest : floor);
+}
+
 
 
 /**
