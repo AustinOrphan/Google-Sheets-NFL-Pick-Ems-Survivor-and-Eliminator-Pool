@@ -5552,6 +5552,7 @@ function countBlankOutcomes(ss, week) {
 // both imports anything currently missing and arms the chain from real game statuses.
 function enableOutcomeAutoFetch() {
   PropertiesService.getDocumentProperties().setProperty(OUTCOME_FETCH_ENABLED_KEY, 'true');
+  installOutcomeFetchOpenTrigger();
   runOutcomesCheck({});
   const status = readOutcomeFetchStatus();
   return { success: true, nextCheck: status.nextCheck || null };
@@ -5573,6 +5574,7 @@ function disableOutcomeAutoFetch() {
   try {
     docProps.deleteProperty(OUTCOME_FETCH_ENABLED_KEY);
     deleteOutcomeFetchTriggers();
+    deleteOutcomeFetchOpenTrigger();
     recordOutcomeFetchStatus({ nextCheck: null, result: 'disabled' });
   } finally {
     if (locked) lock.releaseLock();
@@ -5626,6 +5628,43 @@ function warnIfOutcomeFetchStale(docProps) {
       'Outcome auto-fetch looks stalled. Open Automation > Outcome Auto-Fetch to re-arm it.',
       '🏈 AUTO-FETCH', 10);
   }
+}
+
+const OUTCOME_FETCH_OPEN_HANDLER = 'onOutcomeFetchOpen';
+
+// Installable onOpen. Unlike the simple onOpen it runs with full authorization, so it can
+// inspect triggers and re-arm the chain. Installed by enable, removed by disable.
+function installOutcomeFetchOpenTrigger() {
+  deleteOutcomeFetchOpenTrigger();
+  ScriptApp.newTrigger(OUTCOME_FETCH_OPEN_HANDLER)
+    .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
+    .onOpen()
+    .create();
+  Logger.log('🩺 Outcome auto-fetch self-heal trigger installed.');
+}
+
+function deleteOutcomeFetchOpenTrigger() {
+  let removed = 0;
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    if (trigger.getHandlerFunction() === OUTCOME_FETCH_OPEN_HANDLER) {
+      ScriptApp.deleteTrigger(trigger);
+      removed++;
+    }
+  });
+  return removed;
+}
+
+// Runs on every open by any editor, so it must be cheap when the chain is healthy: one
+// getProjectTriggers call and nothing else. Only when enabled-but-unarmed does it run a full
+// check, which imports whatever was missed and re-arms from real game statuses.
+function onOutcomeFetchOpen(e) {
+  const docProps = PropertiesService.getDocumentProperties();
+  if (docProps.getProperty(OUTCOME_FETCH_ENABLED_KEY) !== 'true') return;
+  const armed = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === OUTCOME_FETCH_HANDLER);
+  if (armed) return;
+  Logger.log('🩺 Outcome auto-fetch chain was dead on open; re-arming.');
+  recordOutcomeFetchStatus({ detail: 'Chain re-armed on open after it had stopped.' });
+  runOutcomesCheck({});
 }
 
 /**
