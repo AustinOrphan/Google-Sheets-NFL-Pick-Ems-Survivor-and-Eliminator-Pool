@@ -5987,7 +5987,7 @@ function parseAllPicksFromSheet(sheet, memberData, asOf) {
     if (name && name.trim() !== '') {
       // A cutoff makes this "last submission before asOf wins". A row whose timestamp
       // cannot be read is kept: dropping it would blank a pick over a data problem.
-      if (asOf && tsCol !== -1) {
+      if (asOf != null && tsCol !== -1) {
         const ts = row[tsCol] instanceof Date ? row[tsCol].getTime() : null;
         if (ts !== null && ts > asOf) return;
       }

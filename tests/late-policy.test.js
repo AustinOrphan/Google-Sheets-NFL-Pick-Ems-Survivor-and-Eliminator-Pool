@@ -118,6 +118,15 @@ describe('parseAllPicksFromSheet asOf cutoff', () => {
     assert.equal(picks.m1.pickem['KC at BUF'], 'KC');
   });
 
+  it('a cutoff of 0 is a real cutoff, not "no cutoff"', () => {
+    const { parseAllPicksFromSheet } = load();
+    // 0 is epoch (1970) and falsy. Guarding with `if (asOf)` would silently treat a
+    // programmatically computed 0 as "no cutoff" and import everything. Task 6 derives
+    // cutoffs from kickoffMs, so a bad subtraction must fail loudly, not disable the policy.
+    const picks = parseAllPicksFromSheet(fakeSheet(rows()), memberData, 0);
+    assert.equal(picks.m1, undefined);
+  });
+
   it('with no timestamp column at all, the cutoff is inert rather than voiding', () => {
     const { parseAllPicksFromSheet } = load();
     const noTs = [['Submitted', 'Select Your Name', 'KC at BUF'], ['x', 'Alice', 'BUF']];
