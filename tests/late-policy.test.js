@@ -29,6 +29,16 @@ describe('findTimestampColumn', () => {
     const { findTimestampColumn } = load();
     assert.equal(findTimestampColumn([], null), -1);
   });
+
+  it('does not match a header that only contains "timestamp" as a substring', () => {
+    const { findTimestampColumn } = load();
+    assert.equal(findTimestampColumn(['Not a Timestamp', 'Select Your Name'], null), -1);
+  });
+
+  it('does not match "Timestamp Submitted", only an exact "Timestamp" header', () => {
+    const { findTimestampColumn } = load();
+    assert.equal(findTimestampColumn(['Timestamp Submitted', 'Select Your Name'], null), -1);
+  });
 });
 
 describe('resolveLatePolicy', () => {
@@ -113,5 +123,18 @@ describe('parseAllPicksFromSheet asOf cutoff', () => {
     const noTs = [['Submitted', 'Select Your Name', 'KC at BUF'], ['x', 'Alice', 'BUF']];
     const picks = parseAllPicksFromSheet(fakeSheet(noTs), memberData, THU.getTime());
     assert.equal(picks.m1.pickem['KC at BUF'], 'BUF');
+  });
+
+  it('honors a cutoff when the Timestamp column is not the first column', () => {
+    const { parseAllPicksFromSheet } = load();
+    const movedHeaders = ['Select Your Name', 'Timestamp', 'KC at BUF'];
+    const movedRows = [
+      movedHeaders,
+      ['Alice', THU, 'KC'],
+      ['Alice', SUN, 'BUF'],
+    ];
+    const cutoff = SUN.getTime() - 1000;
+    const picks = parseAllPicksFromSheet(fakeSheet(movedRows), memberData, cutoff);
+    assert.equal(picks.m1.pickem['KC at BUF'], 'KC');
   });
 });
