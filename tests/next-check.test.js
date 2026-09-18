@@ -154,3 +154,34 @@ describe('isOutcomeImportProblem', () => {
     assert.equal(isOutcomeImportProblem({ message: 42 }), false);
   });
 });
+
+describe('outcomeFetchBackoffMs', () => {
+  it('walks the schedule for the first four failures', () => {
+    const { outcomeFetchBackoffMs } = load();
+    assert.equal(outcomeFetchBackoffMs(1), 15 * 60 * 1000);
+    assert.equal(outcomeFetchBackoffMs(2), 30 * 60 * 1000);
+    assert.equal(outcomeFetchBackoffMs(3), 2 * 60 * 60 * 1000);
+    assert.equal(outcomeFetchBackoffMs(4), 12 * 60 * 60 * 1000);
+  });
+
+  it('caps at the last step rather than growing without bound', () => {
+    const { outcomeFetchBackoffMs } = load();
+    assert.equal(outcomeFetchBackoffMs(5), 12 * 60 * 60 * 1000);
+    assert.equal(outcomeFetchBackoffMs(500), 12 * 60 * 60 * 1000);
+  });
+
+  it('treats zero, negative and garbage as the first failure', () => {
+    const { outcomeFetchBackoffMs } = load();
+    assert.equal(outcomeFetchBackoffMs(0), 15 * 60 * 1000);
+    assert.equal(outcomeFetchBackoffMs(-3), 15 * 60 * 1000);
+    assert.equal(outcomeFetchBackoffMs(undefined), 15 * 60 * 1000);
+    assert.equal(outcomeFetchBackoffMs(NaN), 15 * 60 * 1000);
+  });
+
+  it('never returns a delay shorter than the clamp', () => {
+    const { outcomeFetchBackoffMs, OUTCOME_FETCH_CLAMP_MS } = load();
+    for (const n of [0, 1, 2, 3, 4, 50]) {
+      assert.ok(outcomeFetchBackoffMs(n) >= OUTCOME_FETCH_CLAMP_MS, `failure ${n} backed off less than the clamp`);
+    }
+  });
+});

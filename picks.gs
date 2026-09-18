@@ -5328,6 +5328,20 @@ function deleteWeeklyFetchTrigger() {
 const OUTCOME_FETCH_GAME_FLOOR_MS = 165 * 60 * 1000; // 2h45m: shortest realistic game, not the typical one
 const OUTCOME_FETCH_CLAMP_MS = 15 * 60 * 1000;      // never re-check sooner than this
 
+// Retry schedule after consecutive failures. A transient fault clears on the first or second
+// retry; a structural one (a renamed range, a missing sheet) never does, and without this it
+// would fail every fifteen minutes for the rest of the season, emailing on each attempt.
+const OUTCOME_FETCH_BACKOFF_MS = [15 * 60 * 1000, 30 * 60 * 1000, 2 * 60 * 60 * 1000, 12 * 60 * 60 * 1000];
+
+// Pure. Returns the delay for the nth consecutive failure, capped at the last step so the chain
+// keeps retrying indefinitely rather than standing down - a fixed problem should recover on its
+// own once someone repairs it.
+function outcomeFetchBackoffMs(consecutiveFailures) {
+  const n = Math.floor(consecutiveFailures) || 1;
+  const index = Math.min(Math.max(n, 1) - 1, OUTCOME_FETCH_BACKOFF_MS.length - 1);
+  return OUTCOME_FETCH_BACKOFF_MS[index];
+}
+
 // Pure. games: [{ kickoff: msEpoch, status }], now: Date. Returns the next Date to check, or null
 // to stand down. Completion is decided by status, never by the clock; the clock only decides when
 // to look. Malformed entries are skipped so one bad record cannot stop the chain.
@@ -5436,13 +5450,27 @@ function isOutcomeImportProblem(outcome) {
   return !!(outcome && typeof outcome.message === 'string' && outcome.message.startsWith('⚠️'));
 }
 
-// One email per handled problem. Uncaught throws are not routed here on purpose: Apps Script
-// already emails the owner when a trigger fails, and arming in finally keeps the chain alive.
+// Suppress a repeat of the same problem for a day. A different message always goes out, so a new
+// failure is never swallowed, and an unchanged one still reminds once a day rather than on every
+// run. Note this governs only our own mail: the rethrow in runOutcomesCheck makes Apps Script send
+// its own trigger-failure notice, which we cannot dedupe and which the backoff throttles instead.
+const OUTCOME_FETCH_NOTIFY_FLOOR_MS = 24 * 60 * 60 * 1000;
+
 function notifyOutcomeFetchProblem(subject, body) {
+  const status = readOutcomeFetchStatus();
+  const lastAt = status.lastProblemAt ? new Date(status.lastProblemAt).getTime() : 0;
+  const quiet = isFinite(lastAt) && (Date.now() - lastAt) < OUTCOME_FETCH_NOTIFY_FLOOR_MS;
+  if (status.lastProblem === body && quiet) {
+    Logger.log('⭕ Same outcome auto-fetch problem as last time and within the quiet window; not emailing again.');
+    return false;
+  }
   try {
     MailApp.sendEmail(Session.getEffectiveUser().getEmail(), `[${LEAGUE} Picks] ${subject}`, body);
+    recordOutcomeFetchStatus({ lastProblem: body, lastProblemAt: new Date().toISOString() });
+    return true;
   } catch (err) {
     Logger.log(`⚠️ Could not send outcome auto-fetch email: ${err.message}`);
+    return false;
   }
 }
 
@@ -5499,15 +5527,31 @@ function runOutcomesCheck(e) {
         summary.detail = outcome.message;
         notifyOutcomeFetchProblem(`Outcome auto-fetch problem, week ${fetched.week}`, outcome.message);
       }
-      if (summary.imported > 0) {
+      // A grading failure must be remembered. imported only reads above zero on the run that
+      // actually fills cells, so without this a week whose grading threw once would never be
+      // graded again - later runs find nothing blank and skip straight past.
+      const gradeOwed = readOutcomeFetchStatus().pendingGradeWeek === fetched.week;
+      if (summary.imported > 0 || gradeOwed) {
         if (!problem) summary.result = 'imported';
         if (config.survivorInclude || config.eliminatorInclude) {
-          evalSurvElimStatus(fetched.week);
+          try {
+            evalSurvElimStatus(fetched.week);
+            summary.pendingGradeWeek = null;
+          } catch (gradeErr) {
+            summary.pendingGradeWeek = fetched.week;
+            throw gradeErr;
+          }
+        } else {
+          summary.pendingGradeWeek = null;
         }
-        ss.toast(`Filled ${summary.imported} outcome cell(s) for week ${fetched.week}.`, '🏈 AUTO-FETCH');
+        if (summary.imported > 0) {
+          ss.toast(`Filled ${summary.imported} outcome cell(s) for week ${fetched.week}.`, '🏈 AUTO-FETCH');
+        }
       }
     }
 
+    // Reached only when nothing threw, so the chain is healthy again.
+    summary.consecutiveFailures = 0;
     nextCheck = computeNextCheckTime(collectOutstandingGames(fetched.analysis, fetched.week), new Date());
     if (nextCheck === null && fetched.week >= REGULAR_SEASON) {
       summary.standDown = true;
@@ -5523,9 +5567,12 @@ function runOutcomesCheck(e) {
   } catch (err) {
     summary.result = 'error';
     summary.detail = err.message;
-    Logger.log(`⛔ Outcome auto-fetch failed: ${err.stack}`);
-    // Re-arm on the clamp so a transient failure retries soon rather than never.
-    nextCheck = new Date(Date.now() + OUTCOME_FETCH_CLAMP_MS);
+    summary.consecutiveFailures = (readOutcomeFetchStatus().consecutiveFailures || 0) + 1;
+    const backoff = outcomeFetchBackoffMs(summary.consecutiveFailures);
+    Logger.log(`⛔ Outcome auto-fetch failed (${summary.consecutiveFailures} in a row, retrying in ${Math.round(backoff / 60000)}m): ${err.stack}`);
+    nextCheck = new Date(Date.now() + backoff);
+    // Rethrown on purpose: Apps Script emails the owner when a trigger fails, and that is this
+    // design's error channel. The backoff above is what keeps it from doing so every 15 minutes.
     throw err;
   } finally {
     try {
@@ -5632,6 +5679,8 @@ function getOutcomeAutoFetchStatus() {
     standDown: status.standDown === true,
     owner: status.owner || null,
     isOwner: !status.owner || !outcomeFetchCurrentUser() || status.owner === outcomeFetchCurrentUser(),
+    consecutiveFailures: status.consecutiveFailures || 0,
+    pendingGradeWeek: status.pendingGradeWeek || null,
   };
 }
 
