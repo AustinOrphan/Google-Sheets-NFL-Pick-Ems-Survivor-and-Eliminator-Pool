@@ -5555,17 +5555,37 @@ function enableOutcomeAutoFetch() {
   return { success: true, nextCheck: status.nextCheck || null };
 }
 
+// Disable from the panel. Takes the same script lock runOutcomesCheck holds for its whole body,
+// so acquiring it proves no run is mid-flight and cannot arm a trigger after this clears them.
+// If the lock cannot be had, the flag is cleared anyway - it is the authoritative kill switch,
+// and a run that slips through arms at most one more trigger, which then no-ops and stops.
 function disableOutcomeAutoFetch() {
   const docProps = PropertiesService.getDocumentProperties();
-  docProps.deleteProperty(OUTCOME_FETCH_ENABLED_KEY);
-  const removed = deleteOutcomeFetchTriggers();
-  recordOutcomeFetchStatus({ nextCheck: null, result: 'disabled' });
-  SpreadsheetApp.getActiveSpreadsheet().toast(removed ? '❌ Outcome auto-fetch disabled.' : '❌ Outcome auto-fetch was not running.');
+  const wasEnabled = docProps.getProperty(OUTCOME_FETCH_ENABLED_KEY) === 'true';
+  const lock = LockService.getScriptLock();
+  const locked = lock.tryLock(30 * 1000);
+  if (!locked) {
+    Logger.log('⚠️ Disabling outcome auto-fetch without the lock; a check was still running.');
+  }
+
+  try {
+    docProps.deleteProperty(OUTCOME_FETCH_ENABLED_KEY);
+    deleteOutcomeFetchTriggers();
+    recordOutcomeFetchStatus({ nextCheck: null, result: 'disabled' });
+  } finally {
+    if (locked) lock.releaseLock();
+  }
+
+  // Keyed on whether the feature was on, not on how many triggers happened to exist: a run that
+  // has self-deleted its trigger and not yet re-armed would otherwise report "was not running".
+  SpreadsheetApp.getActiveSpreadsheet().toast(
+    wasEnabled ? '❌ Outcome auto-fetch disabled.' : '❌ Outcome auto-fetch was not running.');
   return { success: true };
 }
 
 // What the panel shows. `armed` is the truth from ScriptApp; `nextCheck` is what we planned.
-// They disagree only when the chain has died, which is exactly what the panel needs to surface.
+// They disagree when the chain has died, which the panel needs to surface - and also, briefly and
+// harmlessly, while a run is in flight between deleting its own trigger and arming the next.
 function getOutcomeAutoFetchStatus() {
   const docProps = PropertiesService.getDocumentProperties();
   const status = readOutcomeFetchStatus();
