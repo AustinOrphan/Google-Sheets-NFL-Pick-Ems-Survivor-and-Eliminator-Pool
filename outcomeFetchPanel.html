@@ -38,6 +38,7 @@
       <div><strong>Result:</strong> <span id="s-result">-</span></div>
       <div><strong>Next check:</strong> <span id="s-next">-</span></div>
       <div id="s-detail-row" class="hidden"><strong>Detail:</strong> <span id="s-detail"></span></div>
+      <div id="s-heal-row" class="hidden"><strong>Self-healed:</strong> <span id="s-heal"></span></div>
     </div>
 
     <p id="stale-note" class="warn hidden">The chain appears to have stopped. Enabling again will run a check now and re-arm it.</p>
@@ -78,6 +79,9 @@
       const detailRow = document.getElementById('s-detail-row');
       if (s.detail) { document.getElementById('s-detail').textContent = s.detail; detailRow.classList.remove('hidden'); }
       else { detailRow.classList.add('hidden'); }
+      const healRow = document.getElementById('s-heal-row');
+      if (s.lastSelfHeal) { document.getElementById('s-heal').textContent = fmt(s.lastSelfHeal); healRow.classList.remove('hidden'); }
+      else { healRow.classList.add('hidden'); }
       document.getElementById('stale-note').classList.toggle('hidden', !stale);
       document.getElementById('enable-btn').textContent = s.enabled && s.armed ? 'Run check now' : 'Enable';
       document.getElementById('disable-btn').disabled = !s.enabled;

@@ -5603,6 +5603,7 @@ function getOutcomeAutoFetchStatus() {
     result: status.result || null,
     detail: status.detail || '',
     nextCheck: status.nextCheck || null,
+    lastSelfHeal: status.lastSelfHeal || null,
   };
 }
 
@@ -5663,8 +5664,10 @@ function onOutcomeFetchOpen(e) {
   const armed = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === OUTCOME_FETCH_HANDLER);
   if (armed) return;
   Logger.log('🩺 Outcome auto-fetch chain was dead on open; re-arming.');
-  recordOutcomeFetchStatus({ detail: 'Chain re-armed on open after it had stopped.' });
   runOutcomesCheck({});
+  // Recorded AFTER the run: runOutcomesCheck rewrites the whole summary, detail included, so
+  // anything written before it would never reach the panel. Its own key, for the same reason.
+  recordOutcomeFetchStatus({ lastSelfHeal: new Date().toISOString() });
 }
 
 /**
