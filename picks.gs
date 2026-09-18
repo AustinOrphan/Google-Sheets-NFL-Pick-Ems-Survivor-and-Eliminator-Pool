@@ -5479,39 +5479,78 @@ function executePickImport(week, importOnlyStartedGames) {
       const picksData = picksRange.getValues();
       const gamePlan = formsData[week]?.gamePlan;
       let startedGames = new Set(getStartedGames());
-  
-      // --- 3. Loop Through Parsed Picks and Populate the Grid ---
+
+      // Member name -> id, so the sheet's rows (not just respondents) can be walked.
+      const nameToMemberId = new Map();
+      for (const id in memberData.members) {
+        nameToMemberId.set(memberData.members[id].name, id);
+      }
+
+      // --- 3. Run the policy's passes over the grid ---
+      const passes = latePolicyPasses(config.latePolicy, gamePlan, Date.now());
+      passes.forEach(pass => {
+        // asOf === null means "no cutoff", which is the parse already done above.
+        const passPicks = pass.asOf === null
+          ? parsedPicks
+          : parseAllPicksFromSheet(responseSheet, memberData, pass.asOf);
+        const passGames = pass.games === null ? ((gamePlan && gamePlan.games) || []) : pass.games;
+
+        passGames.forEach(game => {
+          const teamKey = [game.awayTeam, game.homeTeam].sort().join('-');
+          const colIndex = matchupToColMap.get(teamKey);
+          if (colIndex === undefined) return;
+
+          const matchupShortName = `${game.awayTeam} @ ${game.homeTeam}`;
+          const matchupVsName = `${game.awayTeam} VS ${game.homeTeam}`;
+          // An empty startedGames set (the API failed) means nothing is started, so
+          // nothing can be voided. That is the safe direction.
+          const gameStarted = startedGames.has(matchupShortName) || startedGames.has(matchupVsName);
+
+          if (importOnlyStartedGames && !gameStarted) return; // Skip unstarted games during partial import
+
+          memberNames.forEach((memberName, rowIndex) => {
+            if (!memberName) return;
+            const memberId = nameToMemberId.get(memberName);
+            const memberPicks = memberId ? passPicks[memberId] : null;
+
+            let pick = null;
+            if (memberPicks) {
+              for (const question in memberPicks.pickem) {
+                if (question.includes(game.awayTeamName) && question.includes(game.homeTeamName)) {
+                  const answer = memberPicks.pickem[question];
+                  if (answer === game.awayTeam || answer === game.homeTeam) pick = answer;
+                  break;
+                }
+              }
+            }
+
+            const action = latePickCellAction(picksData[rowIndex][colIndex], gameStarted, pick, pass.fill);
+            if (action === 'write') picksData[rowIndex][colIndex] = pick;
+            else if (action === 'na') picksData[rowIndex][colIndex] = 'N/A';
+          });
+        });
+      });
+
+      // The tiebreaker follows its own game's kickoff, not the week's, so a member
+      // submitting after that game began cannot enter the actual score. Comments are
+      // not scored and keep today's last-submission-wins behavior.
+      const tbCutoff = tiebreakerCutoff(config.latePolicy, gamePlan);
+      const tbPicks = tbCutoff === null
+        ? parsedPicks
+        : parseAllPicksFromSheet(responseSheet, memberData, tbCutoff);
       for (const memberId in parsedPicks) {
         const member = memberData.members[memberId];
         if (!member) continue;
-
-        const picks = parsedPicks[memberId];
         const rowIndex = memberNameToRowMap.get(member.name);
         if (rowIndex === undefined) continue;
-        
-        for (const question in picks.pickem) {
-          const pick = picks.pickem[question];
-
-          const game = gamePlan.games.find(g => question.includes(g.awayTeamName) && question.includes(g.homeTeamName));
-          if (game) {
-            const matchupShortName = `${game.awayTeam} @ ${game.homeTeam}`;
-            const matchupVsName = `${game.awayTeam} VS ${game.homeTeam}`;
-            
-            if (importOnlyStartedGames && !startedGames.has(matchupShortName) && !startedGames.has(matchupVsName)) {
-              continue; // Skip unstarted games during partial import
-            }
-            
-            const teamKey = [game.awayTeam, game.homeTeam].sort().join('-');
-            const colIndex = matchupToColMap.get(teamKey);
-
-            if (colIndex !== undefined) {
-              if (pick === game.awayTeam || pick === game.homeTeam) {
-                picksData[rowIndex][colIndex] = pick;
-              }
-            }
-          }
+        const tb = tbPicks[memberId];
+        // Under a policy, only fill a blank tiebreaker: a filled one is already locked.
+        if (tb && tb.tiebreaker && tiebreakers && tiebreakers[rowIndex]) {
+          const existing = tiebreakers[rowIndex][0];
+          const isBlank = existing === '' || existing === null || existing === undefined;
+          if (tbCutoff === null || isBlank) tiebreakers[rowIndex][0] = tb.tiebreaker;
         }
-        if (picks.tiebreaker && tiebreakers && tiebreakers[rowIndex]) tiebreakers[rowIndex][0] = picks.tiebreaker;
+        const picks = parsedPicks[memberId];
         if (picks.comments && comments && comments[rowIndex]) comments[rowIndex][0] = picks.comments;
       }
       
