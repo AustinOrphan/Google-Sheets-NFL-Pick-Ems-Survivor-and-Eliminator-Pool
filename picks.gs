@@ -12552,3 +12552,27 @@ function saveManualMemberData(payload) {
     throw new Error(err.message);
   }
 }
+
+/**
+ * Diagnostic. Reports what column A of a week's response sheet actually contains,
+ * because a Date and a text string are indistinguishable when you look at the cell.
+ * Run once from the Apps Script editor; not wired to any menu.
+ */
+function inspectResponseTimestamps(week) {
+  const sheet = getDatabaseSheet().getSheetByName(`WK${week}`);
+  if (!sheet) {
+    Logger.log(`⭕ No response sheet WK${week}.`);
+    return;
+  }
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) {
+    Logger.log(`⭕ WK${week} has headers but no responses.`);
+    return;
+  }
+  Logger.log(`Header row: ${JSON.stringify(data[0].slice(0, 4))}`);
+  for (let i = 1; i < Math.min(data.length, 4); i++) {
+    const cell = data[i][0];
+    const kind = cell instanceof Date ? 'Date' : typeof cell;
+    Logger.log(`Row ${i}: column A is a ${kind}, value ${cell}`);
+  }
+}
