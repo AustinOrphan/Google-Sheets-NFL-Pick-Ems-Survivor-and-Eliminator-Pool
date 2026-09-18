@@ -5499,9 +5499,9 @@ function runOutcomesCheck(e) {
       if (summary.imported > 0) {
         if (!problem) summary.result = 'imported';
         if (config.survivorInclude || config.eliminatorInclude) {
-          evalSurvElimStatus(fetched.week, `${weeklySheetPrefix}${fetched.week}`);
+          evalSurvElimStatus(fetched.week);
         }
-        ss.toast(`Imported ${summary.imported} outcome(s) for week ${fetched.week}.`, '🏈 AUTO-FETCH');
+        ss.toast(`Filled ${summary.imported} outcome cell(s) for week ${fetched.week}.`, '🏈 AUTO-FETCH');
       }
     }
 
@@ -5524,7 +5524,9 @@ function runOutcomesCheck(e) {
       if (summary.nextCheck) armNextOutcomeCheck(nextCheck);
     } catch (armErr) {
       // Logged, not thrown: a failure here must not hide the original error or skip the unlock.
+      // Clear the planned check so status does not advertise a trigger that was never armed.
       Logger.log(`⛔ Could not record status or arm the next check: ${armErr.message}`);
+      try { recordOutcomeFetchStatus({ nextCheck: null }); } catch (ignored) {}
     } finally {
       lock.releaseLock();
     }
@@ -6723,7 +6725,7 @@ function processContest(ss, week, contestType, memberData, outcomeMap, config) {
           ui.alert(`✔️ ${contestType} COMPLETE!`, `${completionString}\n\nTo restart, update the Start Week in Config.`, ui.ButtonSet.OK);
         } catch (err) {
           // No UI when running from a trigger; the completion latch and save below still run.
-          Logger.log(`✔️ ${contestType} COMPLETE (no UI to alert): ${completionString}`);
+          Logger.log(`✔️ ${contestType} COMPLETE (no UI to alert, ${err.message}): ${completionString}`);
         }
       }
       config[`${contestType.toLowerCase()}Active`] = false;
