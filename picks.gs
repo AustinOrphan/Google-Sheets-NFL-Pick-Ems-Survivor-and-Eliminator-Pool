@@ -5478,6 +5478,12 @@ function executePickImport(week, importOnlyStartedGames) {
       if (!picksRange) throw new Error(`Named range '${LEAGUE}_PICKS_${week}' not found.`);
       const picksData = picksRange.getValues();
       const gamePlan = formsData[week]?.gamePlan;
+      // No stored game plan means there are no matchups to write. The passes below then walk
+      // nothing at all, so the import must say so rather than report a success it did not have.
+      const gamePlanGames = (gamePlan && gamePlan.games) || [];
+      if (gamePlanGames.length === 0) {
+        Logger.log(`⚠️ Week ${week} has no stored game plan, so there are no matchups to import pick 'em answers into.`);
+      }
       let startedGames = new Set(getStartedGames());
 
       // Member name -> id, so the sheet's rows (not just respondents) can be walked.
@@ -5493,7 +5499,7 @@ function executePickImport(week, importOnlyStartedGames) {
         const passPicks = pass.asOf === null
           ? parsedPicks
           : parseAllPicksFromSheet(responseSheet, memberData, pass.asOf);
-        const passGames = pass.games === null ? ((gamePlan && gamePlan.games) || []) : pass.games;
+        const passGames = pass.games === null ? gamePlanGames : pass.games;
 
         passGames.forEach(game => {
           const teamKey = [game.awayTeam, game.homeTeam].sort().join('-');
@@ -5510,6 +5516,9 @@ function executePickImport(week, importOnlyStartedGames) {
 
           memberNames.forEach((memberName, rowIndex) => {
             if (!memberName) return;
+            // NAMES_{week} and {LEAGUE}_PICKS_{week} share a start row and height by
+            // construction, but a stale or hand-edited named range must not throw here.
+            if (!picksData[rowIndex]) return;
             const memberId = nameToMemberId.get(memberName);
             const memberPicks = memberId ? passPicks[memberId] : null;
 
@@ -5559,8 +5568,12 @@ function executePickImport(week, importOnlyStartedGames) {
       if (!importOnlyStartedGames && config.tiebreakerInclude && tiebreakerRange) tiebreakerRange.setValues(tiebreakers);
       if (!config.commentsExclude && commentRange) commentRange.setValues(comments);
 
-      Logger.log(`✅ Successfully imported Pick 'Em data into week '${week}' sheet.`);
-      ss.toast(`Imported picks for Week ${week}.`, `✅ PICKS IMPORTED`, 3);
+      if (gamePlanGames.length === 0) {
+        ss.toast(`No game plan stored for Week ${week}, so no matchup picks were imported.`, `⚠️ NOTHING IMPORTED`, 5);
+      } else {
+        Logger.log(`✅ Successfully imported Pick 'Em data into week '${week}' sheet.`);
+        ss.toast(`Imported picks for Week ${week}.`, `✅ PICKS IMPORTED`, 3);
+      }
 
     } catch (err) {
       Logger.log(`⚠️ Failed to import Pick 'Em data into week '${week}' sheet: ${err.stack}`);
@@ -5863,6 +5876,17 @@ function gamesStartingAt(gamePlan, kickoff) {
 }
 
 /**
+ * The games whose kickoff cannot be read at all. analyzeScheduleData only converts a
+ * schedule cell with value.toISOString() when it is a real Date (picks.gs:4100-4101), so a
+ * blank or text cell leaves `date` as ''. Such a game has no kickoff to lock against, and
+ * must never be dropped: wrongly counting a late pick is recoverable, losing a pick is not.
+ */
+function gamesWithoutKickoff(gamePlan) {
+  const games = (gamePlan && gamePlan.games) || [];
+  return games.filter(game => !isFinite(kickoffMs(game)));
+}
+
+/**
  * The games whose kickoff is still in the future. Nothing about them is locked yet.
  */
 function gamesAfter(gamePlan, when) {
@@ -5885,7 +5909,14 @@ function latePolicyPasses(policy, gamePlan, now) {
   const openPass = [{ asOf: null, games: null, fill: 'overwrite' }];
   const resolved = resolveLatePolicy(policy);
   const kickoffs = distinctKickoffs(gamePlan);
-  if (resolved === 'none' || kickoffs.length === 0) return openPass;
+  if (resolved === 'none' || kickoffs.length === 0) {
+    // 'none' is the default and would spam every import, so only a policy that was asked
+    // for and could not be applied is worth telling the operator about.
+    if (resolved !== 'none') {
+      Logger.log(`⚠️ Late policy '${resolved}' cannot be applied: no game in this week has a usable kickoff time. Importing with no cutoff instead.`);
+    }
+    return openPass;
+  }
 
   const firstKickoff = kickoffs[0];
   if (resolved === 'close') {
@@ -5909,8 +5940,12 @@ function latePolicyPasses(policy, gamePlan, now) {
       passes.push({ asOf: kickoff, games: gamesStartingAt(gamePlan, kickoff), fill: 'blanks' });
     }
   });
-  const upcoming = gamesAfter(gamePlan, now);
-  if (upcoming.length > 0) passes.push({ asOf: null, games: upcoming, fill: 'overwrite' });
+  // A game whose date cannot be read has no kickoff to lock against, so it rides along with
+  // the not-yet-started games instead of falling out of every pass and never being written.
+  // When EVERY game is dateless there are no kickoffs at all and the guard above has already
+  // returned the single open pass, so this list is only ever a partial-failure repair.
+  const preview = gamesAfter(gamePlan, now).concat(gamesWithoutKickoff(gamePlan));
+  if (preview.length > 0) passes.push({ asOf: null, games: preview, fill: 'overwrite' });
   return passes.length > 0 ? passes : openPass;
 }
 
@@ -5937,15 +5972,26 @@ function latePickCellAction(currentValue, gameStarted, pick, fill) {
  * week's. Without this, a member submitting after the final game began could enter the
  * actual score. Returns null when there is no policy or no usable kickoff, which means
  * "no cutoff" and reproduces today's behavior.
+ *
+ * The tiebreaker cutoff never exceeds the policy's own week cutoff. 'close' cuts the whole
+ * week at first kickoff, so a submission whose pick'em answers were discarded on Thursday
+ * must not still land its tiebreaker on Monday night. 'freeze' and 'game' keep filling
+ * blanks past first kickoff, so there the tiebreaker legitimately follows its own game.
  */
 function tiebreakerCutoff(policy, gamePlan) {
-  if (resolveLatePolicy(policy) === 'none') return null;
+  const resolved = resolveLatePolicy(policy);
+  if (resolved === 'none') return null;
   const games = (gamePlan && gamePlan.games) || [];
   if (games.length === 0) return null;
   const tbIndex = games.findIndex(game => game && game.tiebreaker);
   const game = tbIndex === -1 ? games[games.length - 1] : games[tbIndex];
   const kickoff = kickoffMs(game);
-  return isFinite(kickoff) ? kickoff : null;
+  if (!isFinite(kickoff)) return null;
+  if (resolved === 'close') {
+    const kickoffs = distinctKickoffs(gamePlan);
+    return kickoffs.length === 0 ? kickoff : Math.min(kickoff, kickoffs[0]);
+  }
+  return kickoff;
 }
 
 /**

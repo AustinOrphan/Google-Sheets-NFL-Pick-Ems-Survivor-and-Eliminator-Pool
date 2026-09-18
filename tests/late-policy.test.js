@@ -175,7 +175,11 @@ describe('latePolicyPasses', () => {
   it('kickoffMs also accepts a Date and a number, and rejects junk', () => {
     const { kickoffMs } = load();
     assert.equal(kickoffMs({ date: new Date(THU) }), THU);
-    assert.equal(kickoffMs({ date: iso(THU) }), THU);
+    // An actual number, not the ISO string again: Date.parse of a numeric epoch is NaN,
+    // so deleting the numeric branch of kickoffMs has to fail here.
+    assert.equal(kickoffMs({ date: THU }), THU);
+    assert.ok(!isFinite(kickoffMs({ date: Infinity })));
+    assert.ok(!isFinite(kickoffMs({ date: NaN })));
     assert.ok(!isFinite(kickoffMs({ date: 'kickoff time' })));
     assert.ok(!isFinite(kickoffMs({ date: null })));
     assert.ok(!isFinite(kickoffMs({})));
@@ -270,6 +274,79 @@ describe('latePolicyPasses', () => {
     assert.equal(passes[0].games.length, 4);
   });
 
+  // A schedule cell that is blank or holds text leaves `date` as '' (analyzeScheduleData
+  // only converts a real Date), so a usable week can still contain a dateless game.
+  const mixedPlan = {
+    games: [
+      { date: iso(THU),      awayTeam: 'NE', homeTeam: 'NYJ' },
+      { date: '',            awayTeam: 'KC', homeTeam: 'BUF' },
+      { date: iso(SUN_LATE), awayTeam: 'SF', homeTeam: 'SEA' },
+    ],
+  };
+  const passesHolding = (passes, away, allGames) =>
+    passes.filter(p => (p.games === null ? allGames : p.games).some(g => g.awayTeam === away));
+
+  it('game writes a dateless game in an overwriting pass rather than dropping it', () => {
+    const { latePolicyPasses } = load();
+    // Falling out of every pass would leave those cells untouched forever: no value, no
+    // N/A, no error. A dateless game has no kickoff, so it can never be locked either.
+    const passes = latePolicyPasses('game', mixedPlan, AFTER_ALL);
+    const holding = passesHolding(passes, 'KC', mixedPlan.games);
+    assert.equal(holding.length, 1);
+    assert.equal(holding[0].fill, 'overwrite');
+    assert.equal(holding[0].asOf, null);
+  });
+
+  it('game covers every game exactly once even when one of them is dateless', () => {
+    const { latePolicyPasses } = load();
+    const midweek = THU + 12 * 60 * 60 * 1000;
+    [BEFORE_ALL, midweek, AFTER_ALL].forEach(now => {
+      const passes = latePolicyPasses('game', mixedPlan, now);
+      mixedPlan.games.forEach(game => {
+        const holding = passesHolding(passes, game.awayTeam, mixedPlan.games);
+        assert.equal(holding.length, 1, `${game.awayTeam} must be in exactly one pass at ${now}`);
+      });
+      const kc = passesHolding(passes, 'KC', mixedPlan.games)[0];
+      assert.equal(kc.fill, 'overwrite', 'a dateless game is never locked');
+    });
+  });
+
+  it('close and freeze already cover a dateless game, because they write every game', () => {
+    const { latePolicyPasses } = load();
+    ['close', 'freeze'].forEach(policy => {
+      const passes = latePolicyPasses(policy, mixedPlan, AFTER_ALL);
+      assert.ok(passes.every(p => p.games === null), `${policy} writes all games`);
+    });
+  });
+
+  it('a week where every game is dateless still reduces to the single open pass', () => {
+    const { latePolicyPasses, LATE_POLICIES } = load();
+    const dateless = {
+      games: [
+        { date: '', awayTeam: 'KC', homeTeam: 'BUF' },
+        { date: 'soon', awayTeam: 'SF', homeTeam: 'SEA' },
+      ],
+    };
+    LATE_POLICIES.forEach(p => {
+      assert.deepEqual(latePolicyPasses(p, dateless, AFTER_ALL),
+        [{ asOf: null, games: null, fill: 'overwrite' }]);
+    });
+  });
+
+  it('a game kicking off at exactly now is in exactly one pass, the locking one', () => {
+    const { latePolicyPasses } = load();
+    // Pins the `kickoff <= now` / `kickoff > now` pairing: `<` would drop these games from
+    // every pass, `>=` in gamesAfter would put them in two.
+    const passes = latePolicyPasses('game', gamePlan, SUN_EARLY);
+    gamePlan.games.forEach(game => {
+      const holding = passesHolding(passes, game.awayTeam, gamePlan.games);
+      assert.equal(holding.length, 1, `${game.awayTeam} must be in exactly one pass`);
+    });
+    const kc = passesHolding(passes, 'KC', gamePlan.games)[0];
+    assert.equal(kc.fill, 'blanks');
+    assert.equal(kc.asOf, SUN_EARLY);
+  });
+
   it('an unknown policy behaves exactly as none', () => {
     const { latePolicyPasses } = load();
     assert.deepEqual(latePolicyPasses('nonsense', gamePlan, AFTER_ALL),
@@ -284,6 +361,30 @@ describe('latePolicyPasses', () => {
       assert.deepEqual(latePolicyPasses(p, undefined, AFTER_ALL), expected);
     });
   });
+
+  it('logs when a requested policy degrades to no policy, but never for none', () => {
+    const { latePolicyPasses } = load();
+    // A policy that silently becomes none is exactly the symptom of a wrong date shape,
+    // so it has to be visible. none is the default and would spam every single import.
+    const original = globalThis.Logger;
+    const logged = [];
+    globalThis.Logger = { log: (message) => logged.push(String(message)) };
+    try {
+      latePolicyPasses('none', { games: [] }, AFTER_ALL);
+      assert.equal(logged.length, 0, 'none must not log');
+      latePolicyPasses('close', { games: [] }, AFTER_ALL);
+      latePolicyPasses('game', { games: [{ date: '' }] }, AFTER_ALL);
+      assert.equal(logged.length, 2);
+      assert.ok(logged.every(m => m.includes('⚠️')));
+      assert.ok(logged[0].includes('close'));
+      assert.ok(logged[1].includes('game'));
+      logged.length = 0;
+      latePolicyPasses('close', gamePlan, AFTER_ALL);
+      assert.equal(logged.length, 0, 'an applicable policy must not log');
+    } finally {
+      globalThis.Logger = original;
+    }
+  });
 });
 
 describe('tiebreakerCutoff', () => {
@@ -296,6 +397,41 @@ describe('tiebreakerCutoff', () => {
     const { tiebreakerCutoff } = load();
     const plan = { games: [{ date: iso(THU) }, { date: iso(MON), tiebreaker: true }] };
     assert.equal(tiebreakerCutoff('none', plan), null);
+  });
+
+  it('close cuts the tiebreaker at first kickoff, not at the tiebreaker game', () => {
+    const { tiebreakerCutoff } = load();
+    // close discards everything submitted after first kickoff, so a submission whose
+    // pick'em answers were thrown away on Thursday cannot still score a tiebreaker Monday.
+    const plan = { games: [{ date: iso(THU) }, { date: iso(SUN) }, { date: iso(MON), tiebreaker: true }] };
+    assert.equal(tiebreakerCutoff('close', plan), THU);
+  });
+
+  it('close uses first kickoff even when the tiebreaker game is the earliest one', () => {
+    const { tiebreakerCutoff } = load();
+    const plan = { games: [{ date: iso(SUN) }, { date: iso(THU), tiebreaker: true }, { date: iso(MON) }] };
+    assert.equal(tiebreakerCutoff('close', plan), THU);
+  });
+
+  it('freeze lets the tiebreaker follow its own game, which it keeps blank-filling to', () => {
+    const { tiebreakerCutoff } = load();
+    const plan = { games: [{ date: iso(THU) }, { date: iso(MON), tiebreaker: true }] };
+    assert.equal(tiebreakerCutoff('freeze', plan), MON);
+  });
+
+  it('game lets the tiebreaker follow its own game', () => {
+    const { tiebreakerCutoff } = load();
+    const plan = { games: [{ date: iso(THU) }, { date: iso(MON), tiebreaker: true }] };
+    assert.equal(tiebreakerCutoff('game', plan), MON);
+  });
+
+  it('no policy ever puts the tiebreaker cutoff past its own game kickoff', () => {
+    const { tiebreakerCutoff, LATE_POLICIES } = load();
+    const plan = { games: [{ date: iso(THU) }, { date: iso(SUN), tiebreaker: true }, { date: iso(MON) }] };
+    LATE_POLICIES.forEach(p => {
+      const cutoff = tiebreakerCutoff(p, plan);
+      if (cutoff !== null) assert.ok(cutoff <= SUN, `${p} must not outrun the tiebreaker kickoff`);
+    });
   });
 
   it('uses the kickoff of the game actually flagged as the tiebreaker', () => {
