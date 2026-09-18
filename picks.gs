@@ -5820,11 +5820,15 @@ function resolveLatePolicy(value) {
  *
  * @param {Sheet} sheet The Google Sheet object for a specific week's responses (e.g., 'WK1').
  * @param {Object} memberData The complete, current 'members' object.
+ * @param {number} [asOf] Optional submission-time cutoff, as epoch milliseconds. When
+ *                        given, only rows submitted at or before this instant are
+ *                        considered for "last submission wins". Omit (or pass null/undefined)
+ *                        for today's no-cutoff behavior.
  * @returns {Object} A "picks cache" object, where keys are member IDs and values
  *                   are objects containing all of that member's final picks.
  *                   e.g., { "id_123": { pickem: {...}, survivor: "BAL", ... } }
  */
-function parseAllPicksFromSheet(sheet, memberData) {
+function parseAllPicksFromSheet(sheet, memberData, asOf) {
   if (!sheet) {
     Logger.log(`⭕ "parseAllPicksFromSheet" was called with a null sheet. Returning empty object.`);
     return {};
@@ -5837,7 +5841,8 @@ function parseAllPicksFromSheet(sheet, memberData) {
   }
 
   const headers = data.shift();
-  
+  const tsCol = findTimestampColumn(headers, data[0]);
+
   // --- Find critical column indexes using helper ---
   const { nameCol, newNameCol } = findNameColumns(headers);
   if (nameCol === -1 && newNameCol === -1) {
@@ -5852,9 +5857,15 @@ function parseAllPicksFromSheet(sheet, memberData) {
   const newUserAnswerRegex = /new user/i;
   data.forEach(row => {
     const name = (nameCol === -1 || newUserAnswerRegex.test(row[nameCol]))
-      ? row[newNameCol] 
+      ? row[newNameCol]
       : row[nameCol];
     if (name && name.trim() !== '') {
+      // A cutoff makes this "last submission before asOf wins". A row whose timestamp
+      // cannot be read is kept: dropping it would blank a pick over a data problem.
+      if (asOf && tsCol !== -1) {
+        const ts = row[tsCol] instanceof Date ? row[tsCol].getTime() : null;
+        if (ts !== null && ts > asOf) return;
+      }
       latestSubmissions[name.trim().toLowerCase()] = row;
     }
   });
