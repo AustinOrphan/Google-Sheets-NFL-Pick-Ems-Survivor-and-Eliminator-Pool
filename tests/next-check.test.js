@@ -134,3 +134,23 @@ describe('collectOutstandingGames', () => {
     assert.deepEqual(collectOutstandingGames(null, 3), []);
   });
 });
+
+describe('isOutcomeImportProblem', () => {
+  it('is true for the importer\'s problem message', () => {
+    const { isOutcomeImportProblem } = load();
+    assert.equal(isOutcomeImportProblem({ message: '⚠️ Outcome Import Issue: nope' }), true);
+  });
+
+  it('is false for a success message', () => {
+    const { isOutcomeImportProblem } = load();
+    assert.equal(isOutcomeImportProblem({ message: '✅ SUCCESS!\n\nImported outcomes' }), false);
+  });
+
+  it('is false for false, null, undefined, and a message that is not a string', () => {
+    const { isOutcomeImportProblem } = load();
+    assert.equal(isOutcomeImportProblem(false), false);
+    assert.equal(isOutcomeImportProblem(null), false);
+    assert.equal(isOutcomeImportProblem(undefined), false);
+    assert.equal(isOutcomeImportProblem({ message: 42 }), false);
+  });
+});

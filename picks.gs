@@ -5428,6 +5428,12 @@ function recordOutcomeFetchStatus(patch) {
   return merged;
 }
 
+// Pure. updateSheetsWithApiOutcomes returns { message } on the non-UI path and prefixes a
+// problem with the warning sign; it returns false when handed no games. Anything else is success.
+function isOutcomeImportProblem(outcome) {
+  return !!(outcome && typeof outcome.message === 'string' && outcome.message.startsWith('⚠️'));
+}
+
 // One email per handled problem. Uncaught throws are not routed here on purpose: Apps Script
 // already emails the owner when a trigger fails, and arming in finally keeps the chain alive.
 function notifyOutcomeFetchProblem(subject, body) {
@@ -5439,7 +5445,8 @@ function notifyOutcomeFetchProblem(subject, body) {
 }
 
 // Trigger entry point. Deletes its own trigger, imports outcomes into blank cells, grades
-// Survivor/Eliminator, records status, and ALWAYS arms the next check before returning.
+// Survivor/Eliminator when anything new landed, records status, and ALWAYS arms the next check
+// before returning. Everything that can throw sits inside the try so the finally can do its job.
 function runOutcomesCheck(e) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(30 * 1000)) {
@@ -5448,17 +5455,16 @@ function runOutcomesCheck(e) {
   }
 
   const docProps = PropertiesService.getDocumentProperties();
-  const triggerId = e && e.triggerUid;
-  if (triggerId) {
-    deleteTriggerById(triggerId);
-    docProps.deleteProperty('triggerMeta_' + triggerId);
-  }
-
-  const startedAt = new Date();
   let nextCheck = null;
-  let summary = { lastRun: startedAt.toISOString(), week: null, imported: 0, result: 'no-op', detail: '' };
+  const summary = { lastRun: new Date().toISOString(), week: null, imported: 0, result: 'no-op', detail: '' };
 
   try {
+    const triggerId = e && e.triggerUid;
+    if (triggerId) {
+      deleteTriggerById(triggerId);
+      docProps.deleteProperty('triggerMeta_' + triggerId);
+    }
+
     if (docProps.getProperty(OUTCOME_FETCH_ENABLED_KEY) !== 'true') {
       summary.result = 'disabled';
       return;
@@ -5482,12 +5488,16 @@ function runOutcomesCheck(e) {
       const after = countBlankOutcomes(ss, fetched.week);
       summary.imported = Math.max(0, before - after);
 
-      if (outcome && outcome.message && outcome.message.startsWith('⚠️')) {
+      // Problem reporting and grading are independent: a partial failure that still wrote
+      // outcomes must not skip grading, or the now-filled cells never get graded by a later run.
+      const problem = isOutcomeImportProblem(outcome);
+      if (problem) {
         summary.result = 'problem';
         summary.detail = outcome.message;
         notifyOutcomeFetchProblem(`Outcome auto-fetch problem, week ${fetched.week}`, outcome.message);
-      } else if (summary.imported > 0) {
-        summary.result = 'imported';
+      }
+      if (summary.imported > 0) {
+        if (!problem) summary.result = 'imported';
         if (config.survivorInclude || config.eliminatorInclude) {
           evalSurvElimStatus(fetched.week, `${weeklySheetPrefix}${fetched.week}`);
         }
@@ -5496,33 +5506,42 @@ function runOutcomesCheck(e) {
     }
 
     nextCheck = computeNextCheckTime(collectOutstandingGames(fetched.analysis, fetched.week), new Date());
-    if (nextCheck === null) {
-      summary.result = summary.result === 'imported' ? 'imported; season complete' : 'season complete';
+    if (nextCheck === null && summary.result !== 'problem') {
+      summary.result = summary.imported > 0 ? 'imported; season complete' : 'season complete';
     }
   } catch (err) {
     summary.result = 'error';
     summary.detail = err.message;
     Logger.log(`⛔ Outcome auto-fetch failed: ${err.stack}`);
-    // Re-arm on the clamp so a transient API failure retries soon rather than never.
+    // Re-arm on the clamp so a transient failure retries soon rather than never.
     nextCheck = new Date(Date.now() + OUTCOME_FETCH_CLAMP_MS);
     throw err;
   } finally {
-    recordOutcomeFetchStatus(summary);
-    if (nextCheck && docProps.getProperty(OUTCOME_FETCH_ENABLED_KEY) === 'true') {
-      armNextOutcomeCheck(nextCheck);
-    } else {
-      recordOutcomeFetchStatus({ nextCheck: null });
+    try {
+      const enabled = docProps.getProperty(OUTCOME_FETCH_ENABLED_KEY) === 'true';
+      summary.nextCheck = (nextCheck && enabled) ? nextCheck.toISOString() : null;
+      recordOutcomeFetchStatus(summary);
+      if (summary.nextCheck) armNextOutcomeCheck(nextCheck);
+    } catch (armErr) {
+      // Logged, not thrown: a failure here must not hide the original error or skip the unlock.
+      Logger.log(`⛔ Could not record status or arm the next check: ${armErr.message}`);
+    } finally {
+      lock.releaseLock();
     }
-    lock.releaseLock();
   }
 }
 
-// Counts blank cells in the week's outcome row. The importer only fills blanks, so the drop in
-// this count across a call is exactly how many outcomes it wrote.
+// Counts blank cells across both outcome ranges the importer can write: the weekly sheet's
+// pick'em row (absent when pick'ems are off) and the master OUTCOMES column. The drop across an
+// import is how many cells it filled. It is a signal that something landed, not an exact audit:
+// margins and tiebreakers are not counted, and a human editing between the two reads would be.
 function countBlankOutcomes(ss, week) {
-  const range = ss.getRangeByName(`${LEAGUE}_PICKEM_OUTCOMES_${week}`);
-  if (!range) return 0;
-  return range.getValues()[0].filter(v => v === '' || v === null).length;
+  const names = [`${LEAGUE}_PICKEM_OUTCOMES_${week}`, `${LEAGUE}_OUTCOMES_${week}`];
+  return names.reduce((count, name) => {
+    const range = ss.getRangeByName(name);
+    if (!range) return count;
+    return count + range.getValues().flat().filter(v => v === '' || v === null).length;
+  }, 0);
 }
 
 /**
@@ -6699,8 +6718,13 @@ function processContest(ss, week, contestType, memberData, outcomeMap, config) {
       const activeKey = `${contestType.toLowerCase()}Active`;
       // If the key is undefined (first run) or true, show the alert
       if (config[activeKey] !== false) {
-        const ui = SpreadsheetApp.getUi();
-        ui.alert(`✔️ ${contestType} COMPLETE!`, `${completionString}\n\nTo restart, update the Start Week in Config.`, ui.ButtonSet.OK);
+        try {
+          const ui = SpreadsheetApp.getUi();
+          ui.alert(`✔️ ${contestType} COMPLETE!`, `${completionString}\n\nTo restart, update the Start Week in Config.`, ui.ButtonSet.OK);
+        } catch (err) {
+          // No UI when running from a trigger; the completion latch and save below still run.
+          Logger.log(`✔️ ${contestType} COMPLETE (no UI to alert): ${completionString}`);
+        }
       }
       config[`${contestType.toLowerCase()}Active`] = false;
     }
