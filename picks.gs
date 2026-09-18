@@ -5428,6 +5428,103 @@ function recordOutcomeFetchStatus(patch) {
   return merged;
 }
 
+// One email per handled problem. Uncaught throws are not routed here on purpose: Apps Script
+// already emails the owner when a trigger fails, and arming in finally keeps the chain alive.
+function notifyOutcomeFetchProblem(subject, body) {
+  try {
+    MailApp.sendEmail(Session.getEffectiveUser().getEmail(), `[${LEAGUE} Picks] ${subject}`, body);
+  } catch (err) {
+    Logger.log(`⚠️ Could not send outcome auto-fetch email: ${err.message}`);
+  }
+}
+
+// Trigger entry point. Deletes its own trigger, imports outcomes into blank cells, grades
+// Survivor/Eliminator, records status, and ALWAYS arms the next check before returning.
+function runOutcomesCheck(e) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30 * 1000)) {
+    Logger.log('⭕ Outcome auto-fetch skipped: another run holds the lock.');
+    return;
+  }
+
+  const docProps = PropertiesService.getDocumentProperties();
+  const triggerId = e && e.triggerUid;
+  if (triggerId) {
+    deleteTriggerById(triggerId);
+    docProps.deleteProperty('triggerMeta_' + triggerId);
+  }
+
+  const startedAt = new Date();
+  let nextCheck = null;
+  let summary = { lastRun: startedAt.toISOString(), week: null, imported: 0, result: 'no-op', detail: '' };
+
+  try {
+    if (docProps.getProperty(OUTCOME_FETCH_ENABLED_KEY) !== 'true') {
+      summary.result = 'disabled';
+      return;
+    }
+
+    const fetched = fetchCompletedGames(null);
+    summary.week = fetched.week;
+
+    if (fetched.week > REGULAR_SEASON) {
+      summary.result = 'regular season complete';
+      summary.detail = 'Playoff outcomes are not fetched automatically.';
+      return;
+    }
+
+    const ss = fetchSpreadsheet();
+    const config = JSON.parse(docProps.getProperty('configuration') || '{}');
+
+    if (fetched.completed.length > 0) {
+      const before = countBlankOutcomes(ss, fetched.week);
+      const outcome = updateSheetsWithApiOutcomes(ss, fetched.week, fetched.completed, fetched.formsData, false);
+      const after = countBlankOutcomes(ss, fetched.week);
+      summary.imported = Math.max(0, before - after);
+
+      if (outcome && outcome.message && outcome.message.startsWith('⚠️')) {
+        summary.result = 'problem';
+        summary.detail = outcome.message;
+        notifyOutcomeFetchProblem(`Outcome auto-fetch problem, week ${fetched.week}`, outcome.message);
+      } else if (summary.imported > 0) {
+        summary.result = 'imported';
+        if (config.survivorInclude || config.eliminatorInclude) {
+          evalSurvElimStatus(fetched.week, `${weeklySheetPrefix}${fetched.week}`);
+        }
+        ss.toast(`Imported ${summary.imported} outcome(s) for week ${fetched.week}.`, '🏈 AUTO-FETCH');
+      }
+    }
+
+    nextCheck = computeNextCheckTime(collectOutstandingGames(fetched.analysis, fetched.week), new Date());
+    if (nextCheck === null) {
+      summary.result = summary.result === 'imported' ? 'imported; season complete' : 'season complete';
+    }
+  } catch (err) {
+    summary.result = 'error';
+    summary.detail = err.message;
+    Logger.log(`⛔ Outcome auto-fetch failed: ${err.stack}`);
+    // Re-arm on the clamp so a transient API failure retries soon rather than never.
+    nextCheck = new Date(Date.now() + OUTCOME_FETCH_CLAMP_MS);
+    throw err;
+  } finally {
+    recordOutcomeFetchStatus(summary);
+    if (nextCheck && docProps.getProperty(OUTCOME_FETCH_ENABLED_KEY) === 'true') {
+      armNextOutcomeCheck(nextCheck);
+    } else {
+      recordOutcomeFetchStatus({ nextCheck: null });
+    }
+    lock.releaseLock();
+  }
+}
+
+// Counts blank cells in the week's outcome row. The importer only fills blanks, so the drop in
+// this count across a call is exactly how many outcomes it wrote.
+function countBlankOutcomes(ss, week) {
+  const range = ss.getRangeByName(`${LEAGUE}_PICKEM_OUTCOMES_${week}`);
+  if (!range) return 0;
+  return range.getValues()[0].filter(v => v === '' || v === null).length;
+}
+
 /**
  * The main data-gathering function for the Import Picks panel.
  * This is called by the client-side script on load.
