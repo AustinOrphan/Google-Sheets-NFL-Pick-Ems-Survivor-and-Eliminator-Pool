@@ -6,5 +6,9 @@ docs/AUDIT-NOTES.md
 docs/superpowers/
 .superpowers/
 
-# clasp config - holds the Apps Script project ID of a personal spreadsheet
+# clasp deployment config - both are per-spreadsheet and never upstream.
+# .clasp.json holds a personal Apps Script project ID; appsscript.json is that
+# project's own manifest (timezone, runtime), pulled down by clasp.
 .clasp.json
+.clasp.json.*
+appsscript.json
