@@ -5502,11 +5502,20 @@ function executePickImport(week, importOnlyStartedGames) {
       // it almost always means the form was regenerated after those members submitted.
       const unmatchedByMatchup = new Map();
       const passes = latePolicyPasses(config.latePolicy, gamePlan, Date.now());
+
+      // Passes can share a cutoff, and the tiebreaker loop below reuses these, so parse each
+      // distinct cutoff once. asOf === null is the uncut parse already done above.
+      const parsedPicksByCutoff = new Map();
+      const picksAsOf = (asOf) => {
+        if (asOf === null || asOf === undefined) return parsedPicks;
+        if (!parsedPicksByCutoff.has(asOf)) {
+          parsedPicksByCutoff.set(asOf, parseAllPicksFromSheet(responseSheet, memberData, asOf));
+        }
+        return parsedPicksByCutoff.get(asOf);
+      };
+
       passes.forEach(pass => {
-        // asOf === null means "no cutoff", which is the parse already done above.
-        const passPicks = pass.asOf === null
-          ? parsedPicks
-          : parseAllPicksFromSheet(responseSheet, memberData, pass.asOf);
+        const passPicks = picksAsOf(pass.asOf);
         const passGames = pass.games === null ? gamePlanGames : pass.games;
 
         passGames.forEach(game => {
@@ -5555,26 +5564,39 @@ function executePickImport(week, importOnlyStartedGames) {
       // The tiebreaker follows its own game's kickoff, not the week's, so a member
       // submitting after that game began cannot enter the actual score. Comments are
       // not scored and keep today's last-submission-wins behavior.
-      const tbCutoff = tiebreakerCutoff(config.latePolicy, gamePlan);
-      const tbPicks = tbCutoff === null
-        ? parsedPicks
-        : parseAllPicksFromSheet(responseSheet, memberData, tbCutoff);
+      // The tiebreaker is one cell attached to one game, so it obeys BOTH the policy's pass
+      // structure and its own game's kickoff, whichever comes first. Under 'freeze' that
+      // distinction is the whole point: the picks lock at first kickoff, so the tiebreaker has
+      // to lock with them rather than staying open until the tiebreaker game starts. Before
+      // this, a member frozen out of changing their picks could still change their tiebreaker.
+      const tbGameKickoff = tiebreakerCutoff(config.latePolicy, gamePlan);
+      if (tiebreakers) {
+        passes.forEach(pass => {
+          const tbAsOf = tbGameKickoff === null
+            ? pass.asOf
+            : (pass.asOf === null ? tbGameKickoff : Math.min(pass.asOf, tbGameKickoff));
+          const tbPicks = picksAsOf(tbAsOf);
+          memberNames.forEach((memberName, rowIndex) => {
+            if (!memberName || !tiebreakers[rowIndex]) return;
+            const memberId = nameToMemberId.get(memberName);
+            const tb = memberId ? tbPicks[memberId] : null;
+            if (!tb || !tb.tiebreaker) return;
+            const existing = tiebreakers[rowIndex][0];
+            const isBlank = existing === '' || existing === null || existing === undefined;
+            // A blank-filling pass must not disturb what an earlier pass locked in.
+            if (pass.fill === 'blanks' && !isBlank) return;
+            tiebreakers[rowIndex][0] = tb.tiebreaker;
+          });
+        });
+      }
+
+      // Comments are not scored and belong to no game, so they keep today's
+      // last-submission-wins behavior under every policy.
       for (const memberId in parsedPicks) {
         const member = memberData.members[memberId];
         if (!member) continue;
         const rowIndex = memberNameToRowMap.get(member.name);
         if (rowIndex === undefined) continue;
-        const tb = tbPicks[memberId];
-        // The tiebreaker is one cell attached to one game, so it follows that game's column
-        // rather than a rule of its own: write the answer as of the cutoff, unconditionally.
-        // tbCutoff is already the lock, and it is a fixed instant (null under 'none', a
-        // kickoff otherwise), so re-writing the same answer on every later import is
-        // idempotent. Only filling a blank cell instead would freeze the tiebreaker at
-        // whatever the first import of the week happened to see, and a member who improved
-        // their guess before that game kicked off would never have the update land.
-        if (tb && tb.tiebreaker && tiebreakers && tiebreakers[rowIndex]) {
-          tiebreakers[rowIndex][0] = tb.tiebreaker;
-        }
         const picks = parsedPicks[memberId];
         if (picks.comments && comments && comments[rowIndex]) comments[rowIndex][0] = picks.comments;
       }

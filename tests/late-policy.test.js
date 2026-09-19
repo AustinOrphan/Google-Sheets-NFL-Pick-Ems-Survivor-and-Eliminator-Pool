@@ -881,3 +881,121 @@ describe('a matchup the form never asked about is not voided', () => {
     assert.deepEqual(grid[2], ['N/A', 'N/A', 'N/A']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The tiebreaker is written by its own loop in executePickImport, not by the
+// grid loop, so it needs its own simulation. This mirrors that loop exactly.
+// Found in live testing: under 'freeze' the picks locked at first kickoff but
+// the tiebreaker stayed open until the tiebreaker game started, so a member
+// frozen out of changing their picks could still change their tiebreaker.
+// ---------------------------------------------------------------------------
+function makeTiebreakerSimulator(fixture) {
+  const { gamePlan, headers, submissions, memberData, policy } = fixture;
+
+  const sheetAsOf = (now) => ({
+    getName: () => 'WK1',
+    getDataRange: () => ({
+      getValues: () => [headers.slice()].concat(
+        submissions.filter(row => row[0].getTime() <= now).map(row => row.slice())),
+    }),
+  });
+
+  const runImport = (cells, now) => {
+    const { latePolicyPasses, tiebreakerCutoff, parseAllPicksFromSheet } = load();
+    const sheet = sheetAsOf(now);
+    const uncut = parseAllPicksFromSheet(sheet, memberData);
+    const cache = new Map();
+    const picksAsOf = (asOf) => {
+      if (asOf === null || asOf === undefined) return uncut;
+      if (!cache.has(asOf)) cache.set(asOf, parseAllPicksFromSheet(sheet, memberData, asOf));
+      return cache.get(asOf);
+    };
+    const tbGameKickoff = tiebreakerCutoff(policy, gamePlan);
+    latePolicyPasses(policy, gamePlan, now).forEach(pass => {
+      const tbAsOf = tbGameKickoff === null
+        ? pass.asOf
+        : (pass.asOf === null ? tbGameKickoff : Math.min(pass.asOf, tbGameKickoff));
+      const tbPicks = picksAsOf(tbAsOf);
+      memberData.memberOrder.forEach((memberId, rowIndex) => {
+        const tb = tbPicks[memberId];
+        if (!tb || !tb.tiebreaker) return;
+        const isBlank = cells[rowIndex] === '';
+        if (pass.fill === 'blanks' && !isBlank) return;
+        cells[rowIndex] = tb.tiebreaker;
+      });
+    });
+    return cells;
+  };
+
+  return { runImport, emptyCells: () => memberData.memberOrder.map(() => '') };
+}
+
+describe('the tiebreaker locks with the policy, not on its own schedule', () => {
+  const iso = (ms) => new Date(ms).toISOString();
+  const THU = Date.UTC(2026, 8, 17, 20, 15);
+  const SUN = Date.UTC(2026, 8, 20, 17, 0);
+  const MON = Date.UTC(2026, 8, 22, 0, 15);
+  const WED = THU - 86400000;
+  const SUN_PM = SUN + 2 * 3600000;   // after first kickoff, before the tiebreaker game
+  const TUE = MON + 86400000;
+
+  const gamePlan = { games: [
+    { date: iso(THU), awayTeam: 'NE', homeTeam: 'SEA' },
+    { date: iso(SUN), awayTeam: 'KC', homeTeam: 'BUF' },
+    { date: iso(MON), awayTeam: 'GB', homeTeam: 'MIN', tiebreaker: true },
+  ]};
+
+  // Alice submits on time and then resubmits after first kickoff.
+  // Bob never submitted on time and submits once, late.
+  const base = {
+    gamePlan,
+    headers: ['Timestamp', 'Select Your Name', 'Tiebreaker'],
+    submissions: [
+      [new Date(WED), 'Alice', '45'],
+      [new Date(SUN_PM), 'Alice', '38'],
+      [new Date(SUN_PM), 'Bob', '99'],
+    ],
+    memberData: { members: { m1: { name: 'Alice' }, m2: { name: 'Bob' } }, memberOrder: ['m1', 'm2'] },
+  };
+  const run = (policy, now) => {
+    const sim = makeTiebreakerSimulator(Object.assign({}, base, { policy }));
+    return sim.runImport(sim.emptyCells(), now === undefined ? TUE : now);
+  };
+
+  it('freeze locks an on-time member out of changing their tiebreaker', () => {
+    // The bug: Alice's picks correctly reverted to her pre-kickoff submission while her
+    // tiebreaker kept the post-kickoff value, because the tiebreaker used the tiebreaker
+    // game's kickoff as its only cutoff instead of following the policy's passes.
+    assert.equal(run('freeze')[0], '45');
+  });
+
+  it('freeze still lets a member who never submitted on time enter one', () => {
+    assert.equal(run('freeze')[1], '99');
+  });
+
+  it('none keeps last-submission-wins for the tiebreaker', () => {
+    assert.deepEqual(run('none'), ['38', '99']);
+  });
+
+  it('close ignores a whole post-kickoff submission, tiebreaker included', () => {
+    assert.deepEqual(run('close'), ['45', '']);
+  });
+
+  it('game locks the tiebreaker at its OWN game, so a change before it is legal', () => {
+    // SUN_PM is after first kickoff but before the Monday tiebreaker game, so under
+    // per-game rules Alice's update counts. This is the case that must NOT be "fixed".
+    assert.deepEqual(run('game'), ['38', '99']);
+  });
+
+  it('freeze gives the same answer no matter when the operator imports', () => {
+    const schedules = [[TUE], [WED + 3600000, TUE], [THU + 60000, SUN + 60000, TUE]];
+    const results = schedules.map(times => {
+      const sim = makeTiebreakerSimulator(Object.assign({}, base, { policy: 'freeze' }));
+      let cells = sim.emptyCells();
+      times.forEach(t => { cells = sim.runImport(cells, t); });
+      return cells;
+    });
+    results.forEach(r => assert.deepEqual(r, results[0]));
+    assert.equal(results[0][0], '45');
+  });
+});
