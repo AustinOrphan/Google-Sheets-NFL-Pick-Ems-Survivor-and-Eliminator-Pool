@@ -11048,7 +11048,16 @@ function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   const allBonusRange = `R${bonusRow}C${firstMatchupCol}:R${bonusRow}C${finalMatchupCol}`;
 
   // Points Formula (using efficient SUMPRODUCT)
-  const pointsFormula = `=IFERROR(IF(COUNTA(${outcomesRange}) > 0, SUMPRODUCT(--(${picksRange}=${outcomesRange}), ${allBonusRange}),))`;
+  //
+  // The `--(outcomesRange<>"")` term is load-bearing, not defensive. Without it a
+  // game with no outcome yet compares blank-pick to blank-outcome, Sheets reads
+  // that as equal, and every unplayed game scores as a correct pick for anyone
+  // who has not submitted. Mid-week that put non-submitters at the top of the
+  // leaderboard with one game played: 15 unplayed games x blank = 15 points.
+  // It only shows while a week is partly graded, which is exactly the state the
+  // outcome auto-fetch creates and a single end-of-week import never did.
+  // percentFormula below has always carried the guard; this one did not.
+  const pointsFormula = `=IFERROR(IF(COUNTA(${outcomesRange}) > 0, SUMPRODUCT(--(${picksRange}=${outcomesRange}), --(${outcomesRange}<>""), ${allBonusRange}),))`;
 
   // Rank Formula - new modification to implement force-ranking when tiebreaker finalized
   let rankFormula = '';
