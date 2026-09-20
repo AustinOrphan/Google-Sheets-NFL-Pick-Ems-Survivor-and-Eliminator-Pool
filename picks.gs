@@ -10605,7 +10605,7 @@ function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   const allBonusRange = `R${bonusRow}C${firstMatchupCol}:R${bonusRow}C${finalMatchupCol}`;
 
   // Points Formula (using efficient SUMPRODUCT)
-  const pointsFormula = `=IFERROR(IF(COUNTA(${outcomesRange}) > 0, SUMPRODUCT(--(${picksRange}=${outcomesRange}), ${allBonusRange}),))`;
+  const pointsFormula = `=IFERROR(IF(COUNTA(${outcomesRange}) > 0, SUMPRODUCT(--(${picksRange}=${outcomesRange}), --(${outcomesRange}<>""), ${allBonusRange}),))`;
 
   // Rank Formula - new modification to implement force-ranking when tiebreaker finalized
   let rankFormula = '';
