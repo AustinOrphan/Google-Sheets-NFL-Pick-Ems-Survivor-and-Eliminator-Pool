@@ -12032,6 +12032,28 @@ function getRandomInt(min, max) {
  * @return {Array<Array<number | string>>} A column of true win probabilities.
  * @customfunction
  */
+/**
+ * Whether a pick cell holds an actual team.
+ *
+ * "N/A" is typed into a pick cell to mark a pick that will not be accepted - the
+ * member was locked out of that game. It is not a team, so nothing that counts
+ * teams may count it: it must never become a candidate winner in the win
+ * probability simulation, never acquire popularity in the wildcard consensus,
+ * and never make an otherwise-empty row look like a submission.
+ *
+ * A blank cell means something different - the pick is unknown and may still
+ * arrive - but for every question below the answer is the same, because both
+ * amount to "no team chosen". The distinction matters to scoring intent, and
+ * scoring already awards zero for both.
+ *
+ * Lenient about spacing and case because a human types this by hand.
+ */
+function isRealPick(pick) {
+  if (!pick) return false;
+  const text = String(pick).trim().toUpperCase();
+  return text !== '' && text !== 'N/A';
+}
+
 function calculateWinProbability(playerPicksRange, resultsRange, currentScoresRange, bonusRange, winnersRange, spreadInfoRange) {
   
   if (winnersRange && winnersRange.flat().some(cell => cell)) {
@@ -12045,7 +12067,7 @@ function calculateWinProbability(playerPicksRange, resultsRange, currentScoresRa
   const activePlayers = [];
   
   for (let i = 0; i < originalNumPlayers; i++) {
-    if (playerPicksRange[i].some(pick => pick)) {
+    if (playerPicksRange[i].some(isRealPick)) {
       activePlayers.push({
         originalIndex: i,
         picks: playerPicksRange[i],
@@ -12092,7 +12114,7 @@ function calculateWinProbability(playerPicksRange, resultsRange, currentScoresRa
 
   for (let j = 0; j < numGames; j++) {
     if (gameResults[j] === "") {
-      const picksForGame = new Set(activePlayerPicks.map(row => row[j]).filter(pick => pick));
+      const picksForGame = new Set(activePlayerPicks.map(row => row[j]).filter(isRealPick));
       if (picksForGame.size === 2) {
         const outcomes = Array.from(picksForGame);
         const gameInfo = { columnIndex: j, outcomes: outcomes, bonus: bonuses[j] || 1 };
@@ -12207,7 +12229,7 @@ function calculateWildcardScore(playerPicksRange) {
 
     for (let i = 0; i < numPlayers; i++) {
       const pick = playerPicksRange[i][j];
-      if (pick) { // Only count non-empty picks
+      if (isRealPick(pick)) { // Only count actual team picks
         pickCounts[pick] = (pickCounts[pick] || 0) + 1;
         totalPicksInGame++;
       }
@@ -12254,7 +12276,7 @@ function calculateWildcardScore(playerPicksRange) {
     let minPossibleScore = 0; // The score for picking all favorites
     let maxPossibleScore = 0; // The score for picking all contrarians
 
-    if (playerRow.every(pick => !pick)) {
+    if (!playerRow.some(isRealPick)) {
       finalScores.push([""]); // Return empty for empty rows
       continue;
     }
@@ -12263,7 +12285,7 @@ function calculateWildcardScore(playerPicksRange) {
       const pick = playerRow[j];
       const gameConsensus = consensusData[j];
 
-      if (pick) { // Only score games where a pick was made
+      if (isRealPick(pick)) { // Only score games where a team was actually picked
         const popularityOfPick = gameConsensus.popularity[pick] || 0;
         rawWildcardScore += (1 - popularityOfPick);
         minPossibleScore += gameConsensus.minBoldness;
