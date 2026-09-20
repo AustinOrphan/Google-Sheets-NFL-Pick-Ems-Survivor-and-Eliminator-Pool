@@ -149,6 +149,7 @@ function onOpen() {
         .addItem('📊 Update Spread Data', 'fetchLatestSpreadsForWeek')
         .addItem('✏️ Rename a Member', 'showRenamePanel')
         .addItem('🧮 Update Formulas', 'allFormulasUpdate')
+        .addItem('🔁 Rebuild Weekly Sheet', 'rebuildWeeklySheet')
         .addItem('✅ Update Outcomes Sheet Validation', 'outcomesSheetUpdatePrompt')
         .addSeparator()
         .addItem('📝 Update Form Template ID', 'manualTemplateID')
@@ -8729,6 +8730,76 @@ function rebuildContestSheet(contestType) {
 }
 
 // SURVIVOR Sheet Rebuild Call
+/**
+ * Rebuild one weekly sheet's layout and formulas, keeping every pick.
+ *
+ * WHY this exists: the formulas on a weekly sheet are written by weeklySheet(),
+ * and executePickImport only calls that when the sheet is missing or a member is
+ * missing. So on an established week an import refreshes pick VALUES and leaves
+ * the formulas exactly as they were. A formula fix therefore reaches new weeks
+ * automatically and never reaches the week you are currently playing - which is
+ * the week you noticed the problem on.
+ *
+ * rebuild=true reads the existing picks back through getExistingWeeklySheetData
+ * before rewriting, so anything typed straight into the grid - an N/A marking a
+ * pick that will not be accepted, say - survives.
+ */
+function rebuildWeeklySheet() {
+  const ss = fetchSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  const docProps = PropertiesService.getDocumentProperties();
+  const config = JSON.parse(docProps.getProperty('configuration') || '{}');
+  const memberData = JSON.parse(docProps.getProperty('members') || '{}');
+  const formsData = JSON.parse(docProps.getProperty('forms') || '{}');
+
+  if (!config.pickemsInclude) {
+    ui.alert('\u26a0\ufe0f Not Enabled', 'The pick\'ems pool is not enabled in your Configuration settings.', ui.ButtonSet.OK);
+    return;
+  }
+  if (!memberData.memberOrder || memberData.memberOrder.length === 0) {
+    ui.alert('\u26a0\ufe0f Missing Members', 'No member records found to rebuild a weekly sheet.', ui.ButtonSet.OK);
+    return;
+  }
+
+  const weeks = Object.keys(formsData)
+    .map(Number)
+    .filter(w => !isNaN(w) && ss.getSheetByName(`${weeklySheetPrefix}${w}`))
+    .sort((a, b) => a - b);
+
+  if (weeks.length === 0) {
+    ui.alert('\u26a0\ufe0f No Weekly Sheets', 'No weekly sheets were found to rebuild.', ui.ButtonSet.OK);
+    return;
+  }
+
+  const prompt = ui.prompt(
+    '\ud83d\udd01 REBUILD WEEKLY SHEET',
+    `Enter the week to rebuild. Layout and formulas are rewritten; every pick already in the grid is preserved, including anything typed by hand.\n\nAvailable: ${weeks.join(', ')}`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (prompt.getSelectedButton() !== ui.Button.OK) {
+    ss.toast('Canceled weekly sheet rebuild.', '\ud83d\udeab CANCELED', 3);
+    return;
+  }
+
+  const week = Number(prompt.getResponseText().trim());
+  if (!weeks.includes(week)) {
+    ui.alert('\u26a0\ufe0f Unknown Week', `Week ${prompt.getResponseText().trim()} has no sheet. Available: ${weeks.join(', ')}`, ui.ButtonSet.OK);
+    return;
+  }
+
+  try {
+    let displayEmpty = true;
+    if (config?.hideNonParticipants) displayEmpty = !config.hideNonParticipants;
+    ss.toast(`Rebuilding week ${week} layout and formulas...`, '\ud83d\udd01 REBUILDING', 5);
+    weeklySheet(ss, week, config, formsData, memberData, displayEmpty, true);
+    ss.toast(`Week ${week} rebuilt. Picks preserved.`, '\u2705 DONE', 5);
+  } catch (err) {
+    Logger.log(`\u26a0\ufe0f Failed to rebuild week ${week}: ${err.stack}`);
+    ui.alert('\u26a0\ufe0f Rebuild Failed', `Week ${week} could not be rebuilt.\n\n${err.message}`, ui.ButtonSet.OK);
+  }
+}
+
 function rebuildSurvivorSheet() {
   rebuildContestSheet('survivor');
 }
