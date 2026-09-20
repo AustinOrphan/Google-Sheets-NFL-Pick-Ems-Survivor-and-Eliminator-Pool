@@ -10331,7 +10331,7 @@ function seasonSheet(ss, config, memberData) {
     scores, MAP(rawNames, LAMBDA(name,
       SUM(MAP(wks, LAMBDA(w,
         IF(COUNTA(IFERROR(FILTER(INDIRECT("NAMES_" & w), INDIRECT("NAMES_" & w)=name), ""))=0, 0,
-          IFERROR(SUMPRODUCT(--(FILTER(INDIRECT("${LEAGUE}_PICKS_" & w), INDIRECT("NAMES_" & w)=name) = INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_" & w)), IFERROR(INDIRECT("${LEAGUE}_BONUS_" & w), 1)), 0)
+          IFERROR(SUMPRODUCT(--(FILTER(INDIRECT("${LEAGUE}_PICKS_" & w), INDIRECT("NAMES_" & w)=name) = INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_" & w)), --(INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_" & w)<>""), IFERROR(INDIRECT("${LEAGUE}_BONUS_" & w), 1)), 0)
         )
       )))
     )),
@@ -10361,7 +10361,7 @@ function seasonSheet(ss, config, memberData) {
         wks, ${weeksArrayLiteral},
         SUM(MAP(wks, LAMBDA(w,
           IF(COUNTA(IFERROR(FILTER(INDIRECT("NAMES_" & w), INDIRECT("NAMES_" & w)=$A${r}), ""))=0, 0,
-            IFERROR(SUMPRODUCT(--(FILTER(INDIRECT("${LEAGUE}_PICKS_" & w), INDIRECT("NAMES_" & w)=$A${r}) = INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_" & w)), IFERROR(INDIRECT("${LEAGUE}_BONUS_" & w), 1)), 0)
+            IFERROR(SUMPRODUCT(--(FILTER(INDIRECT("${LEAGUE}_PICKS_" & w), INDIRECT("NAMES_" & w)=$A${r}) = INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_" & w)), --(INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_" & w)<>""), IFERROR(INDIRECT("${LEAGUE}_BONUS_" & w), 1)), 0)
           )
         )))
       )), "")`
@@ -10436,7 +10436,7 @@ function seasonSheet(ss, config, memberData) {
         wks, ${weeksArrayLiteral},
         weeklyScores, MAP(wks, LAMBDA(w,
           IF(COUNTA(IFERROR(FILTER(INDIRECT("NAMES_" & w), INDIRECT("NAMES_" & w)=$A${r}), ""))=0, 0,
-            IFERROR(SUMPRODUCT(--(FILTER(INDIRECT("${LEAGUE}_PICKS_" & w), INDIRECT("NAMES_" & w)=$A${r}) = INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_" & w)), IFERROR(INDIRECT("${LEAGUE}_BONUS_" & w), 1)), 0)
+            IFERROR(SUMPRODUCT(--(FILTER(INDIRECT("${LEAGUE}_PICKS_" & w), INDIRECT("NAMES_" & w)=$A${r}) = INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_" & w)), --(INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_" & w)<>""), IFERROR(INDIRECT("${LEAGUE}_BONUS_" & w), 1)), 0)
           )
         )),
         maxSeasonPossible, SUM(MAP(wks, LAMBDA(w, IFERROR(COLUMNS(INDIRECT("${LEAGUE}_PICKS_" & w)), 0)))),
@@ -10468,7 +10468,7 @@ function seasonSheet(ss, config, memberData) {
           IFERROR(AVERAGE(
             MAP(names, LAMBDA(n,
               IF(COUNTA(IFERROR(FILTER(INDIRECT("NAMES_" & w), INDIRECT("NAMES_" & w)=n), ""))=0, 0,
-                IFERROR(SUMPRODUCT(--(FILTER(INDIRECT("${LEAGUE}_PICKS_" & w), INDIRECT("NAMES_" & w)=n) = INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_" & w)), IFERROR(INDIRECT("${LEAGUE}_BONUS_" & w), 1)), 0)
+                IFERROR(SUMPRODUCT(--(FILTER(INDIRECT("${LEAGUE}_PICKS_" & w), INDIRECT("NAMES_" & w)=n) = INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_" & w)), --(INDIRECT("${LEAGUE}_PICKEM_OUTCOMES_" & w)<>""), IFERROR(INDIRECT("${LEAGUE}_BONUS_" & w), 1)), 0)
               )
             ))
           ), 0)
@@ -11121,13 +11121,13 @@ function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
     if (mnfCols.length === 1) {
       // Logic for a single MNF game (more efficient)
       const singleCol = mnfCols[0];
-      mnfFormulaCore = `-- (R[0]C${singleCol}=R${effectiveOutcomeRow}C${singleCol})`;
+      mnfFormulaCore = `--(R[0]C${singleCol}=R${effectiveOutcomeRow}C${singleCol}) * --(R${effectiveOutcomeRow}C${singleCol}<>"")`;
     } else {
       // Logic for multiple, non-contiguous MNF games
       // Creates array strings like "{R[0]C19, R[0]C20}"
       const picksArrayString = `{${mnfCols.map(c => `R[0]C${c}`).join(',')}}`;
       const resultsArrayString = `{${mnfCols.map(c => `R${effectiveOutcomeRow}C${c}`).join(',')}}`;
-      mnfFormulaCore = `SUMPRODUCT(--(${picksArrayString}=${resultsArrayString}))`;
+      mnfFormulaCore = `SUMPRODUCT(--(${picksArrayString}=${resultsArrayString}), --(${resultsArrayString}<>""))`;
     }
 
     // Wrap the core logic in the standard IFERROR and readiness check
@@ -11197,7 +11197,7 @@ function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   if (!config.mnfExclude && mnfCols.length > 0) {
     // Dynamically create a SUM of SUMPRODUCTs for each MNF column
     const correctPicksSumString = mnfCols.map(col => 
-      `SUMPRODUCT(--(R${entryRowStart}C${col}:R${entryRowEnd}C${col}=R${effectiveOutcomeRow}C${col}))`
+      `SUMPRODUCT(--(R${entryRowStart}C${col}:R${entryRowEnd}C${col}=R${effectiveOutcomeRow}C${col}), --(R${effectiveOutcomeRow}C${col}<>""))`
     ).join('+');
     
     const totalPicks = totalMembers * mnfCols.length;

@@ -65,6 +65,32 @@ describe('weekly points formula', () => {
   });
 });
 
+describe('every picks-versus-outcomes comparison guards the same way', () => {
+  // The first fix caught pointsFormula and stopped there. The same blank = blank
+  // defect was live in six more places - the four seasonSheet rollups and all
+  // three MNF formulas - which is why non-submitters also led the MNF column and
+  // the season standings. Enumerating the sites rather than naming one stops the
+  // next one being missed.
+  const comparisons = source
+    .split('\n')
+    .map((line, i) => ({ line, n: i + 1 }))
+    .filter(({ line }) => /SUMPRODUCT\(--\(|mnfFormulaCore = /.test(line));
+
+  it('finds every comparison site', () => {
+    // If this count changes, a site was added or removed - look at it.
+    assert.equal(comparisons.length, 9, 'unexpected number of comparison sites');
+  });
+
+  for (const { line, n } of comparisons) {
+    it(`line ${n} excludes ungraded games`, () => {
+      assert.ok(
+        line.includes('<>""'),
+        `line ${n} compares picks to outcomes without a blank-outcome guard:\n    ${line.trim()}`,
+      );
+    });
+  }
+});
+
 describe('the arithmetic the guard fixes', () => {
   /** Minimal stand-in for SUMPRODUCT(--(picks=outcomes), [--(outcomes<>"")], bonus). */
   const score = (picks, outcomes, bonus, guarded) =>
