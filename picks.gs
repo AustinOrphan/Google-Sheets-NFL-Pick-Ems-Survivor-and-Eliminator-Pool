@@ -9465,9 +9465,13 @@ function contrarianSheet(ss, memberData) {
     const w = weeks[a];
     const colIdx = a + 3;
     
+    // Measured over the games the member actually picked. Dividing by every game in the
+    // week counted an unpicked game as a disagreement.
     const memberPicksRow = `FILTER(INDIRECT("${LEAGUE}_PICKS_${w}"), INDIRECT("NAMES_${w}")=R[0]C1)`;
+    const memberRealPicks = realPickCount(memberPicksRow, `INDIRECT("${LEAGUE}_${w}")`);
+    const memberAgrees = `SUMPRODUCT(ARRAYFORMULA(--(${memberPicksRow}=REGEXEXTRACT(INDIRECT("${LEAGUE}_BIAS_${w}"), "^[A-Z]{2,3}"))))`;
     sheet.getRange(2, colIdx, totalMembers, 1).setFormulaR1C1(
-      `=IFERROR(IF((COUNTA(${memberPicksRow})-COUNTIF(${memberPicksRow}, "N/A"))=0,, COUNTIF(ARRAYFORMULA(${memberPicksRow}=REGEXEXTRACT(INDIRECT("${LEAGUE}_BIAS_${w}"), "^[A-Z]{2,3}")), FALSE) / COLUMNS(INDIRECT("${LEAGUE}_PICKS_${w}"))), "")`
+      `=IFERROR(IF(${memberRealPicks}=0,, (${memberRealPicks} - ${memberAgrees}) / ${memberRealPicks}), "")`
     );
   }
 
@@ -9926,12 +9930,14 @@ function seasonSheet(ss, config, memberData) {
     );
 
     // True Season % (Resilient)
+    // A week with no real pick stays out of the denominator, exactly as a blank week does.
     const weekPicksRow = `IFERROR(FILTER(INDIRECT("${LEAGUE}_PICKS_" & w), INDIRECT("NAMES_" & w)=$A${r}), "")`;
+    const weekRealPicks = realPickCount(weekPicksRow, `INDIRECT("${LEAGUE}_" & w)`);
     sheet.getRange(r, 3).setFormula(
       `=IFERROR(IF(OR($A${r}="", $B${r}=""), "", LET(
         wks, ${weeksArrayLiteral},
         totalGamesPicked, SUM(MAP(wks, LAMBDA(w,
-          IF((COUNTA(${weekPicksRow})-COUNTIF(${weekPicksRow}, "N/A"))=0, 0,
+          IF(${weekRealPicks}=0, 0,
             IFERROR(COLUMNS(INDIRECT("${LEAGUE}_PICKS_" & w)), 0)
           )
         ))),
@@ -10733,9 +10739,10 @@ function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
 
   // Home/Away Bias summary formulas
   // These span many games, so there is no single matchup to validate against; excluded by name instead.
-  const biasPickCount = `(COUNTA(${allPicksRange})-COUNTIF(${allPicksRange}, "N/A"))`;
-  sheet.getRange(summaryRow, 5).setFormulaR1C1(`=IFERROR(IF(${biasPickCount}>10,"AWAY"&CHAR(10)&ROUND(100*(SUMPRODUCT(ARRAYFORMULA(--(REGEXEXTRACT(R${matchupRow}C${firstMatchupCol}:R${matchupRow}C${finalMatchupCol},"^[A-Z]{2,3}")=${allPicksRange}))))/COUNTA(${allPicksRange}),1)&"%","AWAY"),"AWAY")`);
-  sheet.getRange(summaryRow, 6).setFormulaR1C1(`=IFERROR(IF(${biasPickCount}>10,"HOME"&CHAR(10)&ROUND(100*(SUMPRODUCT(ARRAYFORMULA(--(REGEXEXTRACT(R${matchupRow}C${firstMatchupCol}:R${matchupRow}C${finalMatchupCol},"[A-Z]{2,3}$")=${allPicksRange}))))/COUNTA(${allPicksRange}),1)&"%","HOME"),"HOME")`);
+  const biasMatchups = `R${matchupRow}C${firstMatchupCol}:R${matchupRow}C${finalMatchupCol}`;
+  const biasPickCount = realPickCount(allPicksRange, biasMatchups);
+  sheet.getRange(summaryRow, 5).setFormulaR1C1(`=IFERROR(IF(${biasPickCount}>10,"AWAY"&CHAR(10)&ROUND(100*(SUMPRODUCT(ARRAYFORMULA(--(REGEXEXTRACT(R${matchupRow}C${firstMatchupCol}:R${matchupRow}C${finalMatchupCol},"^[A-Z]{2,3}")=${allPicksRange}))))/${biasPickCount},1)&"%","AWAY"),"AWAY")`);
+  sheet.getRange(summaryRow, 6).setFormulaR1C1(`=IFERROR(IF(${biasPickCount}>10,"HOME"&CHAR(10)&ROUND(100*(SUMPRODUCT(ARRAYFORMULA(--(REGEXEXTRACT(R${matchupRow}C${firstMatchupCol}:R${matchupRow}C${finalMatchupCol},"[A-Z]{2,3}$")=${allPicksRange}))))/${biasPickCount},1)&"%","HOME"),"HOME")`);
   
   // Tiebreaker and Winner columns
   if (config.tiebreakerInclude) {
@@ -11587,6 +11594,15 @@ function getRandomInt(min, max) {
  * @return {Array<Array<number | string>>} A column of true win probabilities.
  * @customfunction
  */
+// Counts cells naming one of the two teams in their own column's matchup. Works for a
+// single row or a whole grid, since the matchup row broadcasts across it.
+function realPickCount(picksRef, matchupsRef) {
+  const away = `REGEXEXTRACT(${matchupsRef},"^[A-Z]{2,3}")`;
+  const home = `REGEXEXTRACT(${matchupsRef},"[A-Z]{2,3}$")`;
+  return `(SUMPRODUCT(ARRAYFORMULA(--(${picksRef}=${away})))`
+       + ` + SUMPRODUCT(ARRAYFORMULA(--(${picksRef}=${home}))))`;
+}
+
 // Matchup cells are written as "AWAY\n@HOME" by weeklySheet.
 function matchupTeams(cell) {
   if (!cell) return null;
