@@ -130,7 +130,7 @@
     function updateDisplayForWeek(weekNumber) {
       const weekData = fullAnalysisData[weekNumber];
       if (!weekData) return;
-      
+
       const categories = {
         complete: { listId: 'completed-list', colId: 'completed-column' },
         active:   { listId: 'active-list',   colId: 'active-column' },
@@ -140,30 +140,45 @@
       let totalGames = 0;
       let completedCount = 0;
       completedGames = [];
-      
+
       // Populate lists and hide/show columns
       for (const status in categories) {
         const games = weekData[status] || [];
         totalGames += games.length;
-        if (status === 'complete') completedCount = games.length;
-        
+
+        if (status === 'complete') {
+          completedCount = games.length;
+        }
+
         const listElement = document.getElementById(categories[status].listId);
         const colElement = document.getElementById(categories[status].colId);
 
-        listElement.innerHTML = games.map(game => `<li>${createMatchupHtml(game, status)}</li>`).join('');
+        listElement.innerHTML = games
+          .map(game => `<li>${createMatchupHtml(game, status)}</li>`)
+          .join('');
+
         colElement.classList.toggle('hidden', games.length === 0);
       }
 
-      // Update the dynamic header
       updatePanelHeader(completedCount, totalGames);
 
-      if (tiebreakerInclude) updateTiebreakerDisplay(weekNumber); 
+      if (tiebreakerInclude) {
+        updateTiebreakerDisplay(weekNumber);
+      }
 
       // Handle postponed/unknown games
-      const otherGames = [ ...(weekData.postponed || []), ...(weekData.unknown || []) ];
+      const otherGames = [
+        ...(weekData.postponed || []),
+        ...(weekData.unknown || [])
+      ];
+
       const otherSection = document.getElementById('other-games-section');
+
       if (otherGames.length > 0) {
-        document.getElementById('other-list').innerHTML = otherGames.map(game => `<li>${createMatchupHtml(game, 'other')}</li>`).join('');
+        document.getElementById('other-list').innerHTML = otherGames
+          .map(game => `<li>${createMatchupHtml(game, 'other')}</li>`)
+          .join('');
+
         otherSection.classList.remove('hidden');
       } else {
         otherSection.classList.add('hidden');
@@ -172,7 +187,9 @@
       // Update import button state
       const importBtn = document.getElementById('import-btn');
       importBtn.disabled = completedCount === 0;
-      importBtn.textContent = completedCount > 0 ? `Submit` : 'No Scores to Import';
+      importBtn.textContent = completedCount > 0
+        ? 'Submit'
+        : 'No Scores to Import';
     }
 
     function updatePanelHeader(completed, total) {

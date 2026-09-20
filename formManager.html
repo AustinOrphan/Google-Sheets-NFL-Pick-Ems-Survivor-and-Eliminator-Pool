@@ -158,8 +158,12 @@
         button.textContent = '⏳...'; // Show immediate feedback
         button.disabled = true;
         google.script.run
-          .withSuccessHandler(response => onStatusToggled(formId, response.newStatus))
-          .withFailureHandler(err => alert(err.message))
+          .withSuccessHandler(response => onStatusToggled(formId, response)) // Pass the whole response
+          .withFailureHandler(err => {
+            alert(err.message);
+            // It's good practice to re-enable the button on failure.
+            buildDashboard(dashboardData); // Redraw to restore original button state
+          })
           .toggleFormStatus(formId);
       } else if (action === 'toggle-respondents') {
         const week = button.dataset.week;
@@ -187,16 +191,26 @@
     /**
      * Callback function to update the UI after a form's status is toggled.
      */
-    function onStatusToggled(formId, newStatus) {
+    function onStatusToggled(formId, response) {
+      const { newStatus, newSyncStatus } = response;
+      
       const button = document.querySelector(`button[data-action="toggle-status"][data-form-id="${formId}"]`);
       const statusDot = document.getElementById(`status-dot-${formId}`);
+      const syncSlider = document.querySelector(`input[data-action="toggle-autosync"][data-form-id="${formId}"]`);
 
-      if (button && statusDot) {
+      if (button && statusDot && syncSlider) {
+        // 1. Update the Lock/Unlock button
         button.disabled = false;
-        button.textContent = newStatus ? '🔒 Lock' : '🔓 Unlock'
+        button.textContent = newStatus ? '🔒 Lock' : '🔓 Unlock';
         button.className = `btn-small ${newStatus ? 'btn-deactivate' : 'btn-activate'}`;
+        
+        // 2. Update the Status icon
         statusDot.title = newStatus ? 'Accepting Responses' : 'Not Accepting';
-        statusDot.textContent = (newStatus ? '📖' : '📕')
+        statusDot.textContent = newStatus ? '📖' : '📕';
+
+        // 3. [THE FIX] Update the Auto-Sync slider
+        // This ensures the slider's visual state matches the trigger's actual state.
+        syncSlider.checked = newSyncStatus;
       }
     }
 
