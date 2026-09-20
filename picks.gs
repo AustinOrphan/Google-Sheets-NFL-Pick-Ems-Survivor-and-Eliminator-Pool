@@ -11116,6 +11116,7 @@ function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   const allChancesRange = `R${entryRowStart}C${chancesCol}:R${entryRowEnd}C${chancesCol}`;
   const allPointsRange = `R${entryRowStart}C${pointsCol}:R${entryRowEnd}C${pointsCol}`;
   const allSpreadsRange = `R${spreadRow}C${firstMatchupCol}:R${spreadRow}C${finalMatchupCol}`;
+  const allMatchupsRange = `R${matchupRow}C${firstMatchupCol}:R${matchupRow}C${finalMatchupCol}`;
   const allBonusRange = `R${bonusRow}C${firstMatchupCol}:R${bonusRow}C${finalMatchupCol}`;
 
   // Points Formula (using efficient SUMPRODUCT)
@@ -11148,13 +11149,13 @@ function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   const percentFormula = `=IFERROR(IF(COUNTA(${outcomesRange}) > 0, SUMPRODUCT(--(${picksRange}=${outcomesRange}), --(${outcomesRange}<>"")) / COUNTA(${outcomesRange}),""))`;
 
   // Chances formula (uses external function) for all rows
-  const chancesFormula = `=calculateWinProbability(${allPicksRange},${outcomesRange},${allPointsRange},${allBonusRange},${allWinnersRange},${allSpreadsRange})`;
+  const chancesFormula = `=calculateWinProbability(${allPicksRange},${outcomesRange},${allPointsRange},${allBonusRange},${allWinnersRange},${allSpreadsRange},${allMatchupsRange})`;
 
   // Sparkline Formula (leverages chances column adjacent)
   const sparklineFormula = `=IFERROR(IF(NOT(ISBLANK(${pointsCell})), SPARKLINE(MAX(${chancesCell},0.05),{"charttype","bar";"max",1;"color1",IF(${chancesCell}=max(${allChancesRange}),"#33ff7a",IF(${chancesCell}<(max(${allChancesRange})/3),"#ffa579","#ffe433"))}),),)`
   
   // Wildcard Formula (uses external function) for all rows
-  const wildCardFormula = `=calculateWildcardScore(${allPicksRange})`;
+  const wildCardFormula = `=calculateWildcardScore(${allPicksRange},${allMatchupsRange})`;
 
   // Tiebreaker Difference Formula
   const tiebreakerDiffFormula = `=IFERROR(IF(OR(ISBLANK(R[0]C[-1]), ISBLANK(R${outcomeRow}C${tiebreakerCol})),, ABS(R[0]C[-1] - R${outcomeRow}C${tiebreakerCol})))`;
@@ -12104,28 +12105,46 @@ function getRandomInt(min, max) {
  * @customfunction
  */
 /**
- * Whether a pick cell holds an actual team.
+ * The two teams playing in a matchup cell, or null if it cannot be read.
  *
- * "N/A" is typed into a pick cell to mark a pick that will not be accepted - the
- * member was locked out of that game. It is not a team, so nothing that counts
- * teams may count it: it must never become a candidate winner in the win
- * probability simulation, never acquire popularity in the wildcard consensus,
- * and never make an otherwise-empty row look like a submission.
- *
- * A blank cell means something different - the pick is unknown and may still
- * arrive - but for every question below the answer is the same, because both
- * amount to "no team chosen". The distinction matters to scoring intent, and
- * scoring already awards zero for both.
- *
- * Lenient about spacing and case because a human types this by hand.
+ * Matchup cells are written as "AWAY\n@HOME" (see weeklySheet), which is also
+ * what the conditional-format rules pull apart with REGEXEXTRACT.
  */
-function isRealPick(pick) {
-  if (!pick) return false;
-  const text = String(pick).trim().toUpperCase();
-  return text !== '' && text !== 'N/A';
+function matchupTeams(cell) {
+  if (!cell) return null;
+  const teams = String(cell).toUpperCase().match(/[A-Z]{2,4}/g);
+  return teams && teams.length >= 2 ? [teams[0], teams[1]] : null;
 }
 
-function calculateWinProbability(playerPicksRange, resultsRange, currentScoresRange, bonusRange, winnersRange, spreadInfoRange) {
+/**
+ * Whether a pick cell holds an actual team.
+ *
+ * Given `teams` from the matchup row this is exact: the pick must name one of the
+ * two sides playing, so anything else - "N/A" marking a pick that will not be
+ * accepted, a dash, a stray note, a typo - is not a pick.
+ *
+ * Without them it falls back to rejecting blanks and the "N/A" marker. That path
+ * exists because a weekly sheet built before this change calls these functions
+ * with the old argument count, and those sheets must keep working until they are
+ * rebuilt rather than silently start counting everything again.
+ *
+ * A blank cell and a non-team string differ in what they promise about the future
+ * - one may still be filled in, the other will not be accepted - but for every
+ * question here the answer is the same, because neither names a team. Scoring
+ * already awards zero for both.
+ */
+function isRealPick(pick, teams) {
+  if (!pick) return false;
+  const text = String(pick).trim().toUpperCase();
+  if (text === '') return false;
+  if (teams) return teams.indexOf(text) !== -1;
+  return text !== 'N/A';
+}
+
+function calculateWinProbability(playerPicksRange, resultsRange, currentScoresRange, bonusRange, winnersRange, spreadInfoRange, matchupsRange) {
+  // Flat list of [away, home] per column, or nulls when the caller is an older
+  // sheet whose formula predates this argument.
+  const gameTeams = (matchupsRange ? matchupsRange.flat() : []).map(matchupTeams);
   
   if (winnersRange && winnersRange.flat().some(cell => cell)) {
     // This logic remains the same, as it's a manual override.
@@ -12138,7 +12157,7 @@ function calculateWinProbability(playerPicksRange, resultsRange, currentScoresRa
   const activePlayers = [];
   
   for (let i = 0; i < originalNumPlayers; i++) {
-    if (playerPicksRange[i].some(isRealPick)) {
+    if (playerPicksRange[i].some((pick, j) => isRealPick(pick, gameTeams[j]))) {
       activePlayers.push({
         originalIndex: i,
         picks: playerPicksRange[i],
@@ -12185,7 +12204,8 @@ function calculateWinProbability(playerPicksRange, resultsRange, currentScoresRa
 
   for (let j = 0; j < numGames; j++) {
     if (gameResults[j] === "") {
-      const picksForGame = new Set(activePlayerPicks.map(row => row[j]).filter(isRealPick));
+      const picksForGame = new Set(
+        activePlayerPicks.map(row => row[j]).filter(pick => isRealPick(pick, gameTeams[j])));
       if (picksForGame.size === 2) {
         const outcomes = Array.from(picksForGame);
         const gameInfo = { columnIndex: j, outcomes: outcomes, bonus: bonuses[j] || 1 };
@@ -12284,7 +12304,8 @@ function calculateWinProbability(playerPicksRange, resultsRange, currentScoresRa
  * @return {Array<Array<number | string>>} A column of wildcard scores from 0.0 to 1.0 (format as % in Sheets).
  * @customfunction
  */
-function calculateWildcardScore(playerPicksRange) {
+function calculateWildcardScore(playerPicksRange, matchupsRange) {
+  const gameTeams = (matchupsRange ? matchupsRange.flat() : []).map(matchupTeams);
   if (!playerPicksRange || playerPicksRange.length === 0) {
     return [[""]];
   }
@@ -12300,7 +12321,7 @@ function calculateWildcardScore(playerPicksRange) {
 
     for (let i = 0; i < numPlayers; i++) {
       const pick = playerPicksRange[i][j];
-      if (isRealPick(pick)) { // Only count actual team picks
+      if (isRealPick(pick, gameTeams[j])) { // Only count actual team picks
         pickCounts[pick] = (pickCounts[pick] || 0) + 1;
         totalPicksInGame++;
       }
@@ -12347,7 +12368,7 @@ function calculateWildcardScore(playerPicksRange) {
     let minPossibleScore = 0; // The score for picking all favorites
     let maxPossibleScore = 0; // The score for picking all contrarians
 
-    if (!playerRow.some(isRealPick)) {
+    if (!playerRow.some((pick, j) => isRealPick(pick, gameTeams[j]))) {
       finalScores.push([""]); // Return empty for empty rows
       continue;
     }
@@ -12356,7 +12377,7 @@ function calculateWildcardScore(playerPicksRange) {
       const pick = playerRow[j];
       const gameConsensus = consensusData[j];
 
-      if (isRealPick(pick)) { // Only score games where a team was actually picked
+      if (isRealPick(pick, gameTeams[j])) { // Only score games where a team was actually picked
         const popularityOfPick = gameConsensus.popularity[pick] || 0;
         rawWildcardScore += (1 - popularityOfPick);
         minPossibleScore += gameConsensus.minBoldness;

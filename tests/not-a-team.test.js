@@ -19,8 +19,77 @@ const { load } = require('./harness');
  */
 
 const GAMES = 16;
+/** The matchup row as weeklySheet writes it: "AWAY\n@HOME". */
+const MATCHUPS = [['DET\n@BUF','PIT\n@NE','GB\n@NYJ','CLE\n@TB','NO\n@BAL','CIN\n@HOU',
+  'CAR\n@ATL','MIN\n@CHI','PHI\n@TEN','LV\n@LAC','JAX\n@DEN','SEA\n@ARI','MIA\n@SF',
+  'WSH\n@DAL','IND\n@KC','NYG\n@LAR']];
 const nonSubmitter = () => ['N/A', ...Array(GAMES - 1).fill('')];
 const submitter = (thursday) => [thursday, ...Array(GAMES - 1).fill('NE')];
+
+describe('matchupTeams', () => {
+  it('reads both sides out of a matchup cell', () => {
+    const { matchupTeams } = load();
+    assert.deepEqual(matchupTeams('DET\n@BUF'), ['DET', 'BUF']);
+  });
+
+  it('handles a cell written on one line', () => {
+    const { matchupTeams } = load();
+    assert.deepEqual(matchupTeams('DET@BUF'), ['DET', 'BUF']);
+  });
+
+  it('returns null for anything it cannot read', () => {
+    const { matchupTeams } = load();
+    for (const junk of ['', null, undefined, 'TBD', '???']) {
+      assert.equal(matchupTeams(junk), null);
+    }
+  });
+});
+
+describe('isRealPick with the matchup known', () => {
+  it('accepts either side of the game', () => {
+    const { isRealPick } = load();
+    assert.equal(isRealPick('BUF', ['DET', 'BUF']), true);
+    assert.equal(isRealPick('DET', ['DET', 'BUF']), true);
+  });
+
+  it('rejects a team that is not in this game', () => {
+    // The whole point of the stronger check: a pick naming a real NFL team that
+    // is not playing in this matchup is still not a pick for this matchup.
+    const { isRealPick } = load();
+    assert.equal(isRealPick('KC', ['DET', 'BUF']), false);
+  });
+
+  it('rejects anything a commissioner might type, not just N/A', () => {
+    const { isRealPick } = load();
+    for (const junk of ['N/A', '--', 'missed', 'late', 'xx', '?']) {
+      assert.equal(isRealPick(junk, ['DET', 'BUF']), false, `${junk} is not a team`);
+    }
+  });
+
+  it('is case and space insensitive about a real pick', () => {
+    const { isRealPick } = load();
+    assert.equal(isRealPick(' buf ', ['DET', 'BUF']), true);
+  });
+});
+
+describe('isRealPick falling back, for sheets built before the change', () => {
+  it('still rejects N/A and blanks when the matchup is unknown', () => {
+    // An existing weekly sheet calls these functions with the old argument
+    // count. Those sheets must keep working until rebuilt, not silently start
+    // counting everything again.
+    const { isRealPick } = load();
+    assert.equal(isRealPick('N/A', undefined), false);
+    assert.equal(isRealPick('', undefined), false);
+    assert.equal(isRealPick('   ', undefined), false);
+  });
+
+  it('accepts any other string when the matchup is unknown', () => {
+    // It cannot do better without knowing who is playing - and accepting a real
+    // pick matters more than rejecting a typo.
+    const { isRealPick } = load();
+    assert.equal(isRealPick('BUF', undefined), true);
+  });
+});
 
 describe('isRealPick', () => {
   it('accepts a team', () => {
@@ -62,7 +131,7 @@ describe('calculateWildcardScore with N/A rows', () => {
     // The empty-row guard exists for exactly these members and was defeated by
     // the single character marking them.
     const { calculateWildcardScore } = load();
-    const out = calculateWildcardScore(grid());
+    const out = calculateWildcardScore(grid(), MATCHUPS);
     for (let i = 0; i < 5; i++) {
       assert.equal(out[i][0], '', `non-submitter row ${i} should be blank`);
     }
@@ -72,8 +141,8 @@ describe('calculateWildcardScore with N/A rows', () => {
     // With N/A counted, a phantom team took a share of the Thursday popularity
     // and every real member's score moved.
     const { calculateWildcardScore } = load();
-    const withNa = calculateWildcardScore(grid());
-    const withoutNa = calculateWildcardScore(grid().slice(5));
+    const withNa = calculateWildcardScore(grid(), MATCHUPS);
+    const withoutNa = calculateWildcardScore(grid().slice(5), MATCHUPS);
     for (let i = 0; i < withoutNa.length; i++) {
       assert.equal(
         withNa[i + 5][0],
@@ -99,6 +168,7 @@ describe('calculateWinProbability with N/A rows', () => {
       bonus,
       picks.map(() => ['']),
       spreads,
+      MATCHUPS,
     );
   };
 
@@ -157,6 +227,7 @@ describe('calculateWinProbability with N/A rows', () => {
       bonus,
       picks.map(() => ['']),
       spreads,
+      MATCHUPS,
     );
     assert.equal(out[0][0], '', 'a non-submitter is not in the running');
     assert.equal(out[2][0], 0.5, 'the two real submitters split it');
