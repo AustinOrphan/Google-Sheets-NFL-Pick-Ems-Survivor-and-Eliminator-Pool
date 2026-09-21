@@ -821,6 +821,7 @@ function processConfigurationSubmission(formObject) {
       'membershipLocked',
       'kickoffLock', // General options below
       'latePolicy',
+      'hideUntilLock',
       // 'playoffsExclude',
       'hideEmojis',
       'initialized',
@@ -5501,7 +5502,7 @@ function executePickImport(week, importOnlyStartedGames) {
       // left alone rather than voided, and the operator is told once per matchup afterwards:
       // it almost always means the form was regenerated after those members submitted.
       const unmatchedByMatchup = new Map();
-      const passes = latePolicyPasses(config.latePolicy, gamePlan, Date.now());
+      const passes = latePolicyPasses(config.latePolicy, gamePlan, Date.now(), config.hideUntilLock);
 
       // Passes can share a cutoff, and the tiebreaker loop below reuses these, so parse each
       // distinct cutoff once. asOf === null is the uncut parse already done above.
@@ -5603,7 +5604,10 @@ function executePickImport(week, importOnlyStartedGames) {
       
       // --- 4. Write Data Back to the Sheet ---
       picksRange.setValues(picksData);
-      if (!importOnlyStartedGames && config.tiebreakerInclude && tiebreakerRange) tiebreakerRange.setValues(tiebreakers);
+      // Every write above was already bounded by tiebreakerCutoff, so once the policy locks the
+      // tiebreaker its value is final and a partial import can write it safely. With no policy
+      // there is no cutoff, so the old rule stands and a partial import leaves the cell alone.
+      if ((tbGameKickoff !== null || !importOnlyStartedGames) && config.tiebreakerInclude && tiebreakerRange) tiebreakerRange.setValues(tiebreakers);
       if (!config.commentsExclude && commentRange) commentRange.setValues(comments);
 
       if (gamePlanGames.length === 0) {
@@ -5620,13 +5624,26 @@ function executePickImport(week, importOnlyStartedGames) {
   }
 
   // --- 5. Populate Survivor & Eliminator Sheets ---
-  if (!importOnlyStartedGames) {
+  // A contest pick is one team for the WHOLE week, not a per-game choice, so it locks once, at
+  // the first kickoff. Letting it change after that would let someone move onto a team whose
+  // game had already been won. Under hideUntilLock it therefore stays off the sheet until that
+  // kickoff and is then written as of that instant, so a late import produces the same sheet an
+  // on-time one would. With the toggle off none of this applies and the old rule stands.
+  const contestLock = contestRevealCutoff(config.latePolicy, formsData[week]?.gamePlan, config.hideUntilLock);
+  const contestHeld = contestLock !== null && Date.now() < contestLock;
+  const contestPicks = contestLock === null
+    ? parsedPicks
+    : parseAllPicksFromSheet(responseSheet, memberData, contestLock);
+
+  if (contestHeld) {
+    ss.toast(`Survivor and Eliminator stay hidden until the first kickoff of Week ${week}.`, `⏳ NOT REVEALED YET`, 5);
+  } else if (contestLock !== null || !importOnlyStartedGames) {
     let survInclude = config.survivorInclude && week >= config.survivorStartWeek;
     const elimInclude = config.eliminatorInclude && week >= config.eliminatorStartWeek;
-    
-    if (survInclude) populateSurvElimSheet(ss, parsedPicks, memberData, config, formsData[week]?.gamePlan, week, 'survivor');
-    if (elimInclude) populateSurvElimSheet(ss, parsedPicks, memberData, config, formsData[week]?.gamePlan, week, 'eliminator');
-    if (survInclude || elimInclude) recordSurvElimResponses(parsedPicks, memberData, week, survInclude, elimInclude);
+
+    if (survInclude) populateSurvElimSheet(ss, contestPicks, memberData, config, formsData[week]?.gamePlan, week, 'survivor');
+    if (elimInclude) populateSurvElimSheet(ss, contestPicks, memberData, config, formsData[week]?.gamePlan, week, 'eliminator');
+    if (survInclude || elimInclude) recordSurvElimResponses(contestPicks, memberData, week, survInclude, elimInclude);
   } else {
     // Restored your original UX notification for partial imports
     const title = ((config.survivorInclude && week >= config.survivorStartWeek) && (config.eliminatorInclude && week >= config.eliminatorStartWeek)) 
@@ -5943,8 +5960,11 @@ function gamesAfter(gamePlan, when) {
  *
  * A week with no usable kickoff times cannot express any policy, so it falls back to
  * today's behavior rather than voiding anything.
+ *
+ * hideUntilLock (optional) keeps a game's picks off the grid until that game's own lock has
+ * passed, so that revealing and locking happen at the same moment.
  */
-function latePolicyPasses(policy, gamePlan, now) {
+function latePolicyPasses(policy, gamePlan, now, hideUntilLock) {
   const openPass = [{ asOf: null, games: null, fill: 'overwrite' }];
   const resolved = resolveLatePolicy(policy);
   const kickoffs = distinctKickoffs(gamePlan);
@@ -5957,11 +5977,21 @@ function latePolicyPasses(policy, gamePlan, now) {
     return openPass;
   }
 
+  // hideUntilLock holds a pick off the grid until its own lock has passed, so that a member
+  // cannot see a pick they might still be influenced by. It SUPPRESSES writes rather than
+  // erasing them: a value some earlier unhidden import already wrote is left where it is.
+  // To switch to an erasing variant, write those cells here with a clearing fill instead of
+  // leaving them out of the passes. One test is named for this choice and pins it.
+  const hide = hideUntilLock === true;
+
   const firstKickoff = kickoffs[0];
   if (resolved === 'close') {
+    // Every game locks together at the first kickoff, so before it there is nothing to reveal.
+    if (hide && now < firstKickoff) return [];
     return [{ asOf: firstKickoff, games: null, fill: 'overwrite' }];
   }
   if (resolved === 'freeze') {
+    if (hide && now < firstKickoff) return [];
     // Everyone who submitted before kickoff is written first and is then untouchable,
     // because the second pass only fills cells that are still blank.
     return [
@@ -5990,9 +6020,15 @@ function latePolicyPasses(policy, gamePlan, now) {
   // the not-yet-started games instead of falling out of every pass and never being written.
   // When EVERY game is dateless there are no kickoffs at all and the guard above has already
   // returned the single open pass, so this list is only ever a partial-failure repair.
-  const preview = gamesAfter(gamePlan, now).concat(gamesWithoutKickoff(gamePlan));
+  // A dateless game rides along even under hide. It has no kickoff, so it has no lock to wait
+  // for, and leaving it out would mean its picks never reached the grid at all. Losing them
+  // silently is worse than showing a game whose stored schedule is already broken.
+  const preview = (hide ? [] : gamesAfter(gamePlan, now)).concat(gamesWithoutKickoff(gamePlan));
   if (preview.length > 0) passes.push({ asOf: null, games: preview, fill: 'overwrite' });
-  return passes.length > 0 ? passes : openPass;
+  if (passes.length > 0) return passes;
+  // Under hide, no pass means nothing has locked yet, which is exactly the intent. Falling back
+  // to the open pass here would write every pick in the week, the opposite of hiding them.
+  return hide ? [] : openPass;
 }
 
 /**
@@ -6096,6 +6132,22 @@ function tiebreakerCutoff(policy, gamePlan) {
     return kickoffs.length === 0 ? kickoff : Math.min(kickoff, kickoffs[0]);
   }
   return kickoff;
+}
+
+/**
+ * When a week's contest picks (Survivor, Eliminator) may be shown, or null if nothing holds
+ * them back and they can be written straight away.
+ *
+ * A contest pick names one team for the WHOLE week rather than a game, so it cannot follow the
+ * per-game schedule the pick grid uses: it locks once, at the first kickoff. Revealing it any
+ * later than that would be pointless, and revealing it earlier would let a member switch onto a
+ * team whose game had already been won.
+ */
+function contestRevealCutoff(policy, gamePlan, hideUntilLock) {
+  if (hideUntilLock !== true) return null;
+  if (resolveLatePolicy(policy) === 'none') return null;
+  const kickoffs = distinctKickoffs(gamePlan);
+  return kickoffs.length === 0 ? null : kickoffs[0];
 }
 
 /**

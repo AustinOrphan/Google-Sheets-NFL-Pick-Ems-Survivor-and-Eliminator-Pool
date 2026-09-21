@@ -999,3 +999,201 @@ describe('the tiebreaker locks with the policy, not on its own schedule', () => 
     assert.equal(results[0][0], '45');
   });
 });
+
+// The "Hide Picks Until Kickoff" setting. It keeps a game's picks off the grid until that
+// game's own lock has passed, so a member can revise freely beforehand without anyone seeing,
+// and revealing and locking happen at the same moment. The setting is read from
+// config.hideUntilLock and reaches the policy as the optional fourth argument.
+describe('hideUntilLock holds each pick until its own lock', () => {
+  const THU = Date.UTC(2026, 8, 17, 20, 15);
+  const SUN_EARLY = Date.UTC(2026, 8, 20, 17, 0);
+  const SUN_LATE = Date.UTC(2026, 8, 20, 20, 25);
+  const iso = (ms) => new Date(ms).toISOString();
+  const BEFORE_ALL = THU - 60 * 60 * 1000;
+  const MIDWEEK = THU + 12 * 60 * 60 * 1000;   // Thursday game done, Sunday games to come
+  const AFTER_ALL = SUN_LATE + 60 * 60 * 1000;
+
+  const gamePlan = {
+    games: [
+      { date: iso(SUN_EARLY), awayTeam: 'KC',  homeTeam: 'BUF' },
+      { date: iso(THU),       awayTeam: 'NE',  homeTeam: 'NYJ' },
+      { date: iso(SUN_EARLY), awayTeam: 'SF',  homeTeam: 'SEA' },
+      { date: iso(SUN_LATE),  awayTeam: 'DAL', homeTeam: 'PHI' },
+    ],
+  };
+
+  const teamsIn = (passes, allGames) => {
+    const names = [];
+    passes.forEach(pass => {
+      (pass.games === null ? allGames : pass.games).forEach(g => names.push(g.awayTeam));
+    });
+    return names.sort();
+  };
+
+  it('omitting the argument leaves every policy exactly as it was', () => {
+    const { latePolicyPasses } = load();
+    // 25 existing call sites pass three arguments. The setting must be opt-in, so an absent
+    // config key, which reads as undefined, has to behave identically to the old signature.
+    ['none', 'close', 'freeze', 'game'].forEach(policy => {
+      [BEFORE_ALL, MIDWEEK, AFTER_ALL].forEach(now => {
+        assert.deepEqual(latePolicyPasses(policy, gamePlan, now, undefined),
+          latePolicyPasses(policy, gamePlan, now), `${policy} at ${now}`);
+        assert.deepEqual(latePolicyPasses(policy, gamePlan, now, false),
+          latePolicyPasses(policy, gamePlan, now), `${policy} at ${now}, explicitly off`);
+      });
+    });
+  });
+
+  it('game before any kickoff writes nothing at all', () => {
+    const { latePolicyPasses } = load();
+    // The dangerous case. Without hide this returns the single open pass, because no kickoff
+    // has passed and the function falls back rather than writing nothing. Under hide that
+    // fallback would reveal every pick in the week, the exact opposite of the intent.
+    assert.deepEqual(latePolicyPasses('game', gamePlan, BEFORE_ALL, true), []);
+  });
+
+  it('game midweek locks the started kickoff and shows none of the rest', () => {
+    const { latePolicyPasses } = load();
+    const passes = latePolicyPasses('game', gamePlan, MIDWEEK, true);
+    assert.deepEqual(passes, [{ asOf: THU, games: [gamePlan.games[1]], fill: 'lock' }]);
+    assert.deepEqual(teamsIn(passes, gamePlan.games), ['NE']);
+  });
+
+  it('game once every kickoff has passed is the same as without hiding', () => {
+    const { latePolicyPasses } = load();
+    // Everything has locked by now, so hiding has nothing left to withhold.
+    assert.deepEqual(latePolicyPasses('game', gamePlan, AFTER_ALL, true),
+      latePolicyPasses('game', gamePlan, AFTER_ALL));
+  });
+
+  it('hide suppresses the write rather than clearing the cell', () => {
+    const { latePolicyPasses } = load();
+    // This test pins the suppress-rather-than-erase choice. A not-yet-locked game is left out
+    // of every pass, so the import does not touch those cells and a value an earlier unhidden
+    // import wrote survives. Switching to the erasing variant means emitting a pass for those
+    // games with a clearing fill, and this is the test to rewrite when that happens.
+    const passes = latePolicyPasses('game', gamePlan, MIDWEEK, true);
+    ['KC', 'SF', 'DAL'].forEach(team => {
+      assert.ok(!teamsIn(passes, gamePlan.games).includes(team),
+        `${team} has not kicked off, so no pass may name it`);
+    });
+  });
+
+  it('close and freeze reveal nothing before the first kickoff', () => {
+    const { latePolicyPasses } = load();
+    // Both lock the whole week at the first kickoff, so before it there is nothing to show.
+    assert.deepEqual(latePolicyPasses('close', gamePlan, BEFORE_ALL, true), []);
+    assert.deepEqual(latePolicyPasses('freeze', gamePlan, BEFORE_ALL, true), []);
+  });
+
+  it('close and freeze are untouched once the first kickoff has passed', () => {
+    const { latePolicyPasses } = load();
+    ['close', 'freeze'].forEach(policy => {
+      [MIDWEEK, AFTER_ALL].forEach(now => {
+        assert.deepEqual(latePolicyPasses(policy, gamePlan, now, true),
+          latePolicyPasses(policy, gamePlan, now), `${policy} at ${now}`);
+      });
+    });
+  });
+
+  it('none ignores the setting, because nothing ever locks under it', () => {
+    const { latePolicyPasses } = load();
+    [BEFORE_ALL, MIDWEEK, AFTER_ALL].forEach(now => {
+      assert.deepEqual(latePolicyPasses('none', gamePlan, now, true),
+        [{ asOf: null, games: null, fill: 'overwrite' }]);
+    });
+  });
+
+  it('a dateless game still rides along, because it has no lock to wait for', () => {
+    const { latePolicyPasses } = load();
+    // It has no kickoff, so it can never lock, so hiding it would hide it forever: no value,
+    // no N/A, no error. Losing those picks silently is worse than showing a game whose
+    // stored schedule is already broken.
+    const mixedPlan = {
+      games: [
+        { date: iso(THU), awayTeam: 'NE', homeTeam: 'NYJ' },
+        { date: '',       awayTeam: 'KC', homeTeam: 'BUF' },
+        { date: iso(SUN_LATE), awayTeam: 'SF', homeTeam: 'SEA' },
+      ],
+    };
+    const passes = latePolicyPasses('game', mixedPlan, MIDWEEK, true);
+    const preview = passes.filter(p => p.fill === 'overwrite');
+    assert.equal(preview.length, 1);
+    assert.deepEqual(preview[0].games.map(g => g.awayTeam), ['KC']);
+    // SF has a real kickoff still to come, so it stays hidden even in that pass.
+    assert.deepEqual(teamsIn(passes, mixedPlan.games), ['KC', 'NE']);
+  });
+
+  it('a week with no usable kickoff still imports, setting or not', () => {
+    const { latePolicyPasses } = load();
+    // A policy that cannot be applied must not turn into a silent refusal to import.
+    const original = globalThis.Logger;
+    const logged = [];
+    globalThis.Logger = { log: (message) => logged.push(String(message)) };
+    try {
+      const datelessPlan = { games: [{ date: '', awayTeam: 'KC', homeTeam: 'BUF' }] };
+      assert.deepEqual(latePolicyPasses('game', datelessPlan, MIDWEEK, true),
+        [{ asOf: null, games: null, fill: 'overwrite' }]);
+      assert.equal(logged.length, 1);
+    } finally {
+      globalThis.Logger = original;
+    }
+  });
+});
+
+// Survivor and Eliminator ask for one team for the whole week, so they cannot lock per game
+// the way the pick grid does. This is the instant they become visible.
+describe('contestRevealCutoff', () => {
+  const THU = Date.UTC(2026, 8, 17, 20, 15);
+  const SUN_EARLY = Date.UTC(2026, 8, 20, 17, 0);
+  const SUN_LATE = Date.UTC(2026, 8, 20, 20, 25);
+  const iso = (ms) => new Date(ms).toISOString();
+
+  const gamePlan = {
+    games: [
+      { date: iso(SUN_EARLY), awayTeam: 'KC',  homeTeam: 'BUF' },
+      { date: iso(THU),       awayTeam: 'NE',  homeTeam: 'NYJ' },
+      { date: iso(SUN_LATE),  awayTeam: 'DAL', homeTeam: 'PHI', tiebreaker: true },
+    ],
+  };
+
+  it('holds nothing back when the setting is off or absent', () => {
+    const { contestRevealCutoff } = load();
+    assert.equal(contestRevealCutoff('game', gamePlan, false), null);
+    assert.equal(contestRevealCutoff('game', gamePlan, undefined), null);
+    // Only a real true counts, so a stray truthy string cannot switch hiding on by accident.
+    assert.equal(contestRevealCutoff('game', gamePlan, 'yes'), null);
+  });
+
+  it('holds nothing back under none, where nothing ever locks', () => {
+    const { contestRevealCutoff } = load();
+    assert.equal(contestRevealCutoff('none', gamePlan, true), null);
+    // An unrecognized policy resolves to none rather than arming a rule nobody asked for.
+    assert.equal(contestRevealCutoff('bogus', gamePlan, true), null);
+  });
+
+  it('reveals at the first kickoff under every locking policy', () => {
+    const { contestRevealCutoff } = load();
+    ['close', 'freeze', 'game'].forEach(policy => {
+      assert.equal(contestRevealCutoff(policy, gamePlan, true), THU, policy);
+    });
+  });
+
+  it('uses the first kickoff even under game, unlike the tiebreaker', () => {
+    const { contestRevealCutoff, tiebreakerCutoff } = load();
+    // The contrast is the point. A tiebreaker belongs to one game and locks with it, so under
+    // 'game' it waits for the Sunday night kickoff. A survivor pick covers the whole week and
+    // must lock before any of it is played, or the choice could be made knowing a result.
+    assert.equal(tiebreakerCutoff('game', gamePlan), SUN_LATE);
+    assert.equal(contestRevealCutoff('game', gamePlan, true), THU);
+  });
+
+  it('holds nothing back when no game has a usable kickoff', () => {
+    const { contestRevealCutoff } = load();
+    // With no kickoff there is no lock to wait for, and refusing to write would strand the
+    // contest sheets empty for the week with no error to explain it.
+    const datelessPlan = { games: [{ date: '', awayTeam: 'KC', homeTeam: 'BUF' }] };
+    assert.equal(contestRevealCutoff('game', datelessPlan, true), null);
+    assert.equal(contestRevealCutoff('game', null, true), null);
+  });
+});
