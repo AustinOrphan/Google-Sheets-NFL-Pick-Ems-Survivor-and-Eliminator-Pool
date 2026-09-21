@@ -12192,43 +12192,6 @@ function getRandomInt(min, max) {
  * @return {Array<Array<number | string>>} A column of true win probabilities.
  * @customfunction
  */
-/**
- * The two teams playing in a matchup cell, or null if it cannot be read.
- *
- * Matchup cells are written as "AWAY\n@HOME" (see weeklySheet), which is also
- * what the conditional-format rules pull apart with REGEXEXTRACT.
- */
-function matchupTeams(cell) {
-  if (!cell) return null;
-  const teams = String(cell).toUpperCase().match(/[A-Z]{2,4}/g);
-  return teams && teams.length >= 2 ? [teams[0], teams[1]] : null;
-}
-
-/**
- * Whether a pick cell holds an actual team.
- *
- * Given `teams` from the matchup row this is exact: the pick must name one of the
- * two sides playing, so anything else - "N/A" marking a pick that will not be
- * accepted, a dash, a stray note, a typo - is not a pick.
- *
- * Without them it falls back to rejecting blanks and the "N/A" marker. That path
- * exists because a weekly sheet built before this change calls these functions
- * with the old argument count, and those sheets must keep working until they are
- * rebuilt rather than silently start counting everything again.
- *
- * A blank cell and a non-team string differ in what they promise about the future
- * - one may still be filled in, the other will not be accepted - but for every
- * question here the answer is the same, because neither names a team. Scoring
- * already awards zero for both.
- */
-function isRealPick(pick, teams) {
-  if (!pick) return false;
-  const text = String(pick).trim().toUpperCase();
-  if (text === '') return false;
-  if (teams) return teams.indexOf(text) !== -1;
-  return text !== 'N/A';
-}
-
 // Counts cells naming one of the two teams in their own column's matchup. Works for a
 // single row or a whole grid, since the matchup row broadcasts across it.
 function realPickCount(picksRef, matchupsRef) {
@@ -12238,9 +12201,24 @@ function realPickCount(picksRef, matchupsRef) {
        + ` + SUMPRODUCT(ARRAYFORMULA(--(${picksRef}=${home}))))`;
 }
 
+// Matchup cells are written as "AWAY\n@HOME" by weeklySheet.
+function matchupTeams(cell) {
+  if (!cell) return null;
+  const teams = String(cell).toUpperCase().match(/[A-Z]{2,4}/g);
+  return teams && teams.length >= 2 ? [teams[0], teams[1]] : null;
+}
+
+// `teams` is optional: a weekly sheet built before this change calls these
+// functions without it, and must keep working until it is rebuilt.
+function isRealPick(pick, teams) {
+  if (!pick) return false;
+  const text = String(pick).trim().toUpperCase();
+  if (text === '') return false;
+  if (teams) return teams.indexOf(text) !== -1;
+  return text !== 'N/A';
+}
+
 function calculateWinProbability(playerPicksRange, resultsRange, currentScoresRange, bonusRange, winnersRange, spreadInfoRange, matchupsRange) {
-  // Flat list of [away, home] per column, or nulls when the caller is an older
-  // sheet whose formula predates this argument.
   const gameTeams = (matchupsRange ? matchupsRange.flat() : []).map(matchupTeams);
   
   if (winnersRange && winnersRange.flat().some(cell => cell)) {
