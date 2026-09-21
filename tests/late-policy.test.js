@@ -1197,3 +1197,178 @@ describe('contestRevealCutoff', () => {
     assert.equal(contestRevealCutoff('game', null, true), null);
   });
 });
+
+// The kickoff chain's scheduling. These are the pure halves of runPickLockCheck: when to wake
+// next, and which week a run that wakes should import.
+describe('pick lock chain scheduling', () => {
+  const LEAD = 5 * 60 * 1000;
+  const THU = Date.UTC(2026, 8, 17, 20, 15);
+  const SUN_EARLY = Date.UTC(2026, 8, 20, 17, 0);
+  const SUN_LATE = Date.UTC(2026, 8, 20, 20, 25);
+  const NEXT_THU = Date.UTC(2026, 8, 24, 20, 15);
+  const iso = (ms) => new Date(ms).toISOString();
+
+  const formsData = {
+    '3': { gamePlan: { games: [
+      { date: iso(THU),       awayTeam: 'NE',  homeTeam: 'NYJ' },
+      { date: iso(SUN_EARLY), awayTeam: 'KC',  homeTeam: 'BUF' },
+      { date: iso(SUN_EARLY), awayTeam: 'SF',  homeTeam: 'SEA' },
+      { date: iso(SUN_LATE),  awayTeam: 'DAL', homeTeam: 'PHI' },
+    ] } },
+    '4': { gamePlan: { games: [
+      { date: iso(NEXT_THU), awayTeam: 'GB', homeTeam: 'CHI' },
+    ] } },
+  };
+
+  it('backs off further each time, then holds instead of standing down', () => {
+    const { pickLockBackoffMs } = load();
+    assert.equal(pickLockBackoffMs(1), 15 * 60 * 1000);
+    assert.equal(pickLockBackoffMs(2), 30 * 60 * 1000);
+    assert.equal(pickLockBackoffMs(3), 2 * 60 * 60 * 1000);
+    assert.equal(pickLockBackoffMs(4), 12 * 60 * 60 * 1000);
+    // Capped, not stopped. A structural fault should recover on its own once someone fixes it.
+    assert.equal(pickLockBackoffMs(9), 12 * 60 * 60 * 1000);
+    assert.equal(pickLockBackoffMs(0), 15 * 60 * 1000);
+  });
+
+  it('wakes a short while after the next kickoff still to come', () => {
+    const { nextPickLockCheck } = load();
+    assert.deepEqual(nextPickLockCheck(formsData, THU - 60 * 60 * 1000), { week: '3', at: THU + LEAD });
+  });
+
+  it('gives games sharing a kickoff a single wake', () => {
+    const { nextPickLockCheck } = load();
+    // KC and SF both start at SUN_EARLY. Six games at 1:00 must mean one import at 1:05, not six.
+    const friday = THU + 12 * 60 * 60 * 1000;
+    assert.deepEqual(nextPickLockCheck(formsData, friday), { week: '3', at: SUN_EARLY + LEAD });
+  });
+
+  it('rolls into the next week without a rule for rollover', () => {
+    const { nextPickLockCheck } = load();
+    // Scanning every stored week rather than tracking a "current" one is what makes this work.
+    assert.deepEqual(nextPickLockCheck(formsData, SUN_LATE + LEAD), { week: '4', at: NEXT_THU + LEAD });
+  });
+
+  it('reports nothing to wake for once every stored kickoff has gone', () => {
+    const { nextPickLockCheck } = load();
+    assert.equal(nextPickLockCheck(formsData, NEXT_THU + LEAD + 1), null);
+    assert.equal(nextPickLockCheck({}, THU), null);
+    assert.equal(nextPickLockCheck(null, THU), null);
+  });
+
+  it('ignores a game whose date cannot be read rather than throwing', () => {
+    const { nextPickLockCheck, pickLockWeeksDue } = load();
+    const broken = { '3': { gamePlan: { games: [{ date: '', awayTeam: 'KC', homeTeam: 'BUF' }] } },
+                     '4': { notAGamePlan: true } };
+    assert.equal(nextPickLockCheck(broken, THU), null);
+    assert.deepEqual(pickLockWeeksDue(broken, {}, THU), []);
+  });
+
+  it('marks a week due through its most recent kickoff', () => {
+    const { pickLockWeeksDue } = load();
+    assert.deepEqual(pickLockWeeksDue(formsData, {}, SUN_EARLY + LEAD),
+      [{ week: '3', throughKickoff: SUN_EARLY }]);
+  });
+
+  it('has nothing due before the first kickoff has passed', () => {
+    const { pickLockWeeksDue } = load();
+    assert.deepEqual(pickLockWeeksDue(formsData, {}, THU - 1), []);
+    // Within the lead window the kickoff has happened but the wake has not arrived yet.
+    assert.deepEqual(pickLockWeeksDue(formsData, {}, THU + 60 * 1000), []);
+  });
+
+  it('stops re-importing a week once its last kickoff has been revealed', () => {
+    const { pickLockWeeksDue } = load();
+    // Without the high-water mark a finished week stays due forever, because its last kickoff is
+    // permanently in the past, so every idle wake would import it again and overwrite any
+    // correction typed into the grid by hand.
+    const revealed = { '3': SUN_LATE, '4': NEXT_THU };
+    assert.deepEqual(pickLockWeeksDue(formsData, revealed, NEXT_THU + 30 * 24 * 60 * 60 * 1000), []);
+  });
+
+  it('still reports a week due when only some of its kickoffs are revealed', () => {
+    const { pickLockWeeksDue } = load();
+    assert.deepEqual(pickLockWeeksDue(formsData, { '3': THU }, SUN_LATE + LEAD),
+      [{ week: '3', throughKickoff: SUN_LATE }]);
+  });
+
+  it('catches up an outage that spanned a week boundary, oldest first', () => {
+    const { pickLockWeeksDue } = load();
+    // The single-week version lost the earlier week for good here: keyed on the most recent
+    // kickoff alone, week 3 would never be looked at again once week 4 had started.
+    const due = pickLockWeeksDue(formsData, { '3': THU }, NEXT_THU + LEAD);
+    assert.deepEqual(due, [
+      { week: '3', throughKickoff: SUN_LATE },
+      { week: '4', throughKickoff: NEXT_THU },
+    ]);
+  });
+
+  it('hands a kickoff from the waker to the importer with no gap and no overlap', () => {
+    const { nextPickLockCheck, pickLockWeeksDue } = load();
+    // The boundary worth pinning: at the exact instant a wake fires, that kickoff must already
+    // be due to import, and must no longer be offered as a future wake. An off-by-one either
+    // way silently drops a lock or arms a trigger for a moment that has passed.
+    const wake = nextPickLockCheck(formsData, THU - 1);
+    assert.equal(wake.at, THU + LEAD);
+    assert.deepEqual(pickLockWeeksDue(formsData, {}, wake.at), [{ week: '3', throughKickoff: THU }]);
+    assert.notEqual(nextPickLockCheck(formsData, wake.at).at, wake.at);
+  });
+});
+
+// The chain is armed by the hide setting, but only a locking policy actually has locks.
+describe('pickLockChainWanted', () => {
+  it('wants the chain only when hiding is on AND something locks', () => {
+    const { pickLockChainWanted } = load();
+    assert.equal(pickLockChainWanted({ hideUntilLock: true, latePolicy: 'game' }), true);
+    assert.equal(pickLockChainWanted({ hideUntilLock: true, latePolicy: 'close' }), true);
+    assert.equal(pickLockChainWanted({ hideUntilLock: true, latePolicy: 'freeze' }), true);
+  });
+
+  it('does not arm under Open, where it would just auto-publish the week', () => {
+    const { pickLockChainWanted } = load();
+    // Hiding is implemented inside the policy, so under 'none' latePolicyPasses returns the
+    // single open pass. A chain firing at the first kickoff would publish every pick in the
+    // week, which is the opposite of what turning this on asks for.
+    assert.equal(pickLockChainWanted({ hideUntilLock: true, latePolicy: 'none' }), false);
+    assert.equal(pickLockChainWanted({ hideUntilLock: true }), false);
+    assert.equal(pickLockChainWanted({ hideUntilLock: true, latePolicy: 'bogus' }), false);
+  });
+
+  it('does not arm while hiding is off', () => {
+    const { pickLockChainWanted } = load();
+    assert.equal(pickLockChainWanted({ hideUntilLock: false, latePolicy: 'game' }), false);
+    assert.equal(pickLockChainWanted({ latePolicy: 'game' }), false);
+    assert.equal(pickLockChainWanted(null), false);
+  });
+});
+
+describe('pickLockChainLooksAlive', () => {
+  const NOW = Date.UTC(2026, 8, 20, 18, 0);
+  const GRACE = 2 * 60 * 60 * 1000;
+  const iso = (ms) => new Date(ms).toISOString();
+
+  it('is alive while the planned check is still ahead', () => {
+    const { pickLockChainLooksAlive } = load();
+    assert.equal(pickLockChainLooksAlive({ nextCheck: iso(NOW + 60 * 1000) }, NOW), true);
+  });
+
+  it('tolerates a check running late, because triggers slip by minutes', () => {
+    const { pickLockChainLooksAlive } = load();
+    assert.equal(pickLockChainLooksAlive({ nextCheck: iso(NOW - 30 * 60 * 1000) }, NOW), true);
+    assert.equal(pickLockChainLooksAlive({ nextCheck: iso(NOW - GRACE) }, NOW), true);
+  });
+
+  it('is dead once the planned check is long past', () => {
+    const { pickLockChainLooksAlive } = load();
+    assert.equal(pickLockChainLooksAlive({ nextCheck: iso(NOW - GRACE - 1000) }, NOW), false);
+  });
+
+  it('is dead when a run failed to arm, or never ran at all', () => {
+    const { pickLockChainLooksAlive } = load();
+    // The finally clears nextCheck when arming throws, which is exactly this case.
+    assert.equal(pickLockChainLooksAlive({ nextCheck: null }, NOW), false);
+    assert.equal(pickLockChainLooksAlive({}, NOW), false);
+    assert.equal(pickLockChainLooksAlive(null, NOW), false);
+    assert.equal(pickLockChainLooksAlive({ nextCheck: 'not a date' }, NOW), false);
+  });
+});
