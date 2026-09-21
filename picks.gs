@@ -9835,9 +9835,13 @@ function contrarianSheet(ss, memberData) {
     // A row of nothing but "N/A" is a member who never submitted, so the cell stays blank
     // rather than reading as 100% contrarian. A partly filled row keeps today's treatment,
     // where a cell that does not hold the group's team counts against it.
+    // Measured over the games the member actually picked. Dividing by every game in the
+    // week counted an unpicked game as a disagreement.
     const memberPicksRow = `FILTER(INDIRECT("${LEAGUE}_PICKS_${w}"), INDIRECT("NAMES_${w}")=R[0]C1)`;
+    const memberRealPicks = realPickCount(memberPicksRow, `INDIRECT("${LEAGUE}_${w}")`);
+    const memberAgrees = `SUMPRODUCT(ARRAYFORMULA(--(${memberPicksRow}=REGEXEXTRACT(INDIRECT("${LEAGUE}_BIAS_${w}"), "^[A-Z]{2,3}"))))`;
     sheet.getRange(2, colIdx, totalMembers, 1).setFormulaR1C1(
-      `=IFERROR(IF((COUNTA(${memberPicksRow})-COUNTIF(${memberPicksRow}, "N/A"))=0,, COUNTIF(ARRAYFORMULA(${memberPicksRow}=REGEXEXTRACT(INDIRECT("${LEAGUE}_BIAS_${w}"), "^[A-Z]{2,3}")), FALSE) / COLUMNS(INDIRECT("${LEAGUE}_PICKS_${w}"))), "")`
+      `=IFERROR(IF(${memberRealPicks}=0,, (${memberRealPicks} - ${memberAgrees}) / ${memberRealPicks}), "")`
     );
   }
 
@@ -10299,12 +10303,14 @@ function seasonSheet(ss, config, memberData) {
     // A week of nothing but "N/A" is a member who never submitted, so it stays out of their
     // own denominator exactly as a blank week does. COUNTA on its own would count those
     // cells as a played week and score it as zero correct.
+    // A week with no real pick stays out of the denominator, as a blank week does.
     const weekPicksRow = `IFERROR(FILTER(INDIRECT("${LEAGUE}_PICKS_" & w), INDIRECT("NAMES_" & w)=$A${r}), "")`;
+    const weekRealPicks = realPickCount(weekPicksRow, `INDIRECT("${LEAGUE}_" & w)`);
     sheet.getRange(r, 3).setFormula(
       `=IFERROR(IF(OR($A${r}="", $B${r}=""), "", LET(
         wks, ${weeksArrayLiteral},
         totalGamesPicked, SUM(MAP(wks, LAMBDA(w,
-          IF((COUNTA(${weekPicksRow})-COUNTIF(${weekPicksRow}, "N/A"))=0, 0,
+          IF(${weekRealPicks}=0, 0,
             IFERROR(COLUMNS(INDIRECT("${LEAGUE}_PICKS_" & w)), 0)
           )
         ))),
@@ -11062,9 +11068,8 @@ function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   // "N/A" marks a member who never submitted, not a vote. The away side is derived as
   // total_picks - home_picks, so counting those cells would hand every one of them to the
   // away team. COUNTA minus the N/A count leaves blanks treated exactly as they are today.
-  const splitPicksRange = `R${entryRowStart}C[0]:R${entryRowEnd}C[0]`;
-  const splitPickCount = `(COUNTA(${splitPicksRange})-COUNTIF(${splitPicksRange}, "N/A"))`;
-  const homeAwaySplitFormula = `=IFERROR(IF(${splitPickCount}=0,, LET(total_picks, ${splitPickCount}, home_team, REGEXEXTRACT(R${matchupRow}C[0], "[A-Z]{2,3}$"), home_picks, COUNTIF(${splitPicksRange}, home_team), away_team, REGEXEXTRACT(R${matchupRow}C[0], "^[A-Z]{2,3}"), IF(home_picks = total_picks/2, "SPLIT"&CHAR(10)&"50%", IF(home_picks > total_picks/2, home_team & CHAR(10) & ROUND(100*home_picks/total_picks,0)&"%", away_team & CHAR(10) & ROUND(100*(total_picks-home_picks)/total_picks,0)&"%")))))`;
+  const splitPicks = `R${entryRowStart}C[0]:R${entryRowEnd}C[0]`;
+  const homeAwaySplitFormula = `=IFERROR(LET(home_team, REGEXEXTRACT(R${matchupRow}C[0], "[A-Z]{2,3}$"), away_team, REGEXEXTRACT(R${matchupRow}C[0], "^[A-Z]{2,3}"), home_picks, COUNTIF(${splitPicks}, home_team), away_picks, COUNTIF(${splitPicks}, away_team), total_picks, home_picks + away_picks, IF(total_picks=0,, IF(home_picks = away_picks, "SPLIT"&CHAR(10)&"50%", IF(home_picks > away_picks, home_team & CHAR(10) & ROUND(100*home_picks/total_picks,0)&"%", away_team & CHAR(10) & ROUND(100*away_picks/total_picks,0)&"%")))))`;
   sheet.getRange(summaryRow, firstMatchupCol, 1, matchups).setFormulaR1C1(homeAwaySplitFormula);
 
   // Formula to calculate the winner based on the spread
@@ -11110,7 +11115,8 @@ function weeklySheet(ss,week,config,forms,memberData,displayEmpty,rebuild) {
   // Same reasoning as the per matchup split above: an "N/A" cell is nobody's vote, so it
   // belongs in neither the sample size test nor the denominator. Counting it would leave
   // the away and home percentages summing to less than 100.
-  const biasPickCount = `(COUNTA(${allPicksRange})-COUNTIF(${allPicksRange}, "N/A"))`;
+  const biasMatchups = `R${matchupRow}C${firstMatchupCol}:R${matchupRow}C${finalMatchupCol}`;
+  const biasPickCount = realPickCount(allPicksRange, biasMatchups);
   sheet.getRange(summaryRow, 5).setFormulaR1C1(`=IFERROR(IF(${biasPickCount}>10,"AWAY"&CHAR(10)&ROUND(100*(SUMPRODUCT(ARRAYFORMULA(--(REGEXEXTRACT(R${matchupRow}C${firstMatchupCol}:R${matchupRow}C${finalMatchupCol},"^[A-Z]{2,3}")=${allPicksRange}))))/${biasPickCount},1)&"%","AWAY"),"AWAY")`);
   sheet.getRange(summaryRow, 6).setFormulaR1C1(`=IFERROR(IF(${biasPickCount}>10,"HOME"&CHAR(10)&ROUND(100*(SUMPRODUCT(ARRAYFORMULA(--(REGEXEXTRACT(R${matchupRow}C${firstMatchupCol}:R${matchupRow}C${finalMatchupCol},"[A-Z]{2,3}$")=${allPicksRange}))))/${biasPickCount},1)&"%","HOME"),"HOME")`);
   
@@ -11964,6 +11970,15 @@ function getRandomInt(min, max) {
  * @return {Array<Array<number | string>>} A column of true win probabilities.
  * @customfunction
  */
+// Counts cells naming one of the two teams in their own column's matchup. Works for a
+// single row or a whole grid, since the matchup row broadcasts across it.
+function realPickCount(picksRef, matchupsRef) {
+  const away = `REGEXEXTRACT(${matchupsRef},"^[A-Z]{2,3}")`;
+  const home = `REGEXEXTRACT(${matchupsRef},"[A-Z]{2,3}$")`;
+  return `(SUMPRODUCT(ARRAYFORMULA(--(${picksRef}=${away})))`
+       + ` + SUMPRODUCT(ARRAYFORMULA(--(${picksRef}=${home}))))`;
+}
+
 function calculateWinProbability(playerPicksRange, resultsRange, currentScoresRange, bonusRange, winnersRange, spreadInfoRange) {
   
   if (winnersRange && winnersRange.flat().some(cell => cell)) {
