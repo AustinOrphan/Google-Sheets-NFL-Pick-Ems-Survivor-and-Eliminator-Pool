@@ -187,6 +187,9 @@ function onOpen() {
         .addItem('❔ Help & Support', 'showSupportDialog')
         .addToUi();
 
+    // After the menu, so a stopped chain never delays it.
+    warnIfPickLockStale(docProps);
+
   } else {
     const ui = fetchUi();
     if (!docProps.getProperty('tz')) {
@@ -823,6 +826,8 @@ function processConfigurationSubmission(formObject) {
 
       'membershipLocked',
       'kickoffLock', // General options below
+      'latePolicy',
+      'hideUntilLock',
       // 'playoffsExclude',
       'hideEmojis',
       'initialized',
@@ -902,6 +907,9 @@ function processConfigurationSubmission(formObject) {
       updateOutcomeSheetVisibility(configToSave);
     }
     saveProperties('configuration', configToSave);
+    // The kickoff chain is armed by the hide setting rather than a switch of its own: with
+    // hiding on it is required for correctness, with it off it is convenience nobody asked for.
+    syncPickLockChain(configToSave);
 
     if (removeNewUserEntry) {
       try {
@@ -1294,7 +1302,14 @@ function checkAndPromptTrackingSheetsDeployment(week, ss) {
   }
 
   // 4. Present the 3-Option Prompt
-  const ui = SpreadsheetApp.getUi();
+  // Unattended callers (the kickoff chain) reach this on any pool that has not yet deployed the
+  // tracking suite. Asking a question nobody can answer used to throw here, and because this
+  // call sits outside executePickImport's try, the throw took the whole import down with it.
+  const ui = tryFetchUi();
+  if (!ui) {
+    Logger.log('ℹ️ Skipping the tracking-sheet prompt: no UI in this context.');
+    return;
+  }
   const response = ui.alert(
     '📊 Deploy Season Tracking Sheets?',
     `Week ${week} picks are imported!\n\n` +
@@ -4298,6 +4313,8 @@ function createNewFormForWeek(gamePlan) {
 
       // Storing properties
       saveProperties('forms',forms);
+      // A new week's kickoffs are only now visible to the kickoff chain.
+      refreshPickLockSchedule();
       
       // Setting up synce for form
       try {
@@ -4355,8 +4372,12 @@ function getDatabaseSheet() {
   }
 
   // If we reach here, either there was no ID or the old one was invalid.
-  const ui = SpreadsheetApp.getUi();
-  ui.alert('Backend Database Not Found', 'A private spreadsheet for storing form responses could not be found. A new one will be created now.', ui.ButtonSet.OK);
+  const dbUi = tryFetchUi();
+  if (dbUi) {
+    dbUi.alert('Backend Database Not Found', 'A private spreadsheet for storing form responses could not be found. A new one will be created now.', dbUi.ButtonSet.OK);
+  } else {
+    Logger.log('⚠️ Backend database not found; creating a new one with no UI to announce it.');
+  }
   
   const config = JSON.parse(docProps.getProperty('configuration'));
   const formsFolder = getFormsFolder(config.groupName || `${LEAGUE} Picks Pool`);
@@ -4713,7 +4734,10 @@ function buildFormFromGamePlan(gamePlan) {
     ss.toast(`Returning information to form creation controller...`,`↩️ REROUTING DATA`);
     
     const formId = form.getId();
-    if (config.kickoffLock) setOneTimeFormLockTrigger(formId, gamePlan);
+    // The 'close' policy promises the form shuts at the first kickoff, so it arms the same
+    // one-time lock trigger kickoffLock does. resolveLatePolicy, rather than the raw value,
+    // keeps an unrecognized setting from arming a trigger nobody asked for.
+    if (config.kickoffLock || resolveLatePolicy(config.latePolicy) === 'close') setOneTimeFormLockTrigger(formId, gamePlan);
     
     return {
       formId: formId,
@@ -5837,6 +5861,11 @@ function launchFormImport() {
  */
 function executePickImport(week, importOnlyStartedGames) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  // The pick'em section below catches its own failures so a human sees a toast and the rest of
+  // the import still runs. That is fine at a keyboard and wrong for a trigger, which would
+  // otherwise record a healthy import having written nothing to the grid. Reported separately
+  // from `success` so the existing caller's handling is unchanged.
+  let pickemError = null;
   
   // 1. Sync first so new users submitting via the form are in memberData
   syncFormResponses(week);
@@ -5911,65 +5940,173 @@ function executePickImport(week, importOnlyStartedGames) {
       if (!picksRange) throw new Error(`Named range '${LEAGUE}_PICKS_${week}' not found.`);
       const picksData = picksRange.getValues();
       const gamePlan = formsData[week]?.gamePlan;
+      // No stored game plan means there are no matchups to write. The passes below then walk
+      // nothing at all, so the import must say so rather than report a success it did not have.
+      const gamePlanGames = (gamePlan && gamePlan.games) || [];
+      if (gamePlanGames.length === 0) {
+        Logger.log(`⚠️ Week ${week} has no stored game plan, so there are no matchups to import pick 'em answers into.`);
+      }
       let startedGames = new Set(getStartedGames());
-  
-      // --- 3. Loop Through Parsed Picks and Populate the Grid ---
+
+      // Member name -> id, so the sheet's rows (not just respondents) can be walked.
+      const nameToMemberId = new Map();
+      for (const id in memberData.members) {
+        nameToMemberId.set(memberData.members[id].name, id);
+      }
+
+      // --- 3. Run the policy's passes over the grid ---
+      // Members whose submission held no question about a given matchup. Their cells are
+      // left alone rather than voided, and the operator is told once per matchup afterwards:
+      // it almost always means the form was regenerated after those members submitted.
+      const unmatchedByMatchup = new Map();
+      const passes = latePolicyPasses(config.latePolicy, gamePlan, Date.now(), config.hideUntilLock);
+
+      // Passes can share a cutoff, and the tiebreaker loop below reuses these, so parse each
+      // distinct cutoff once. asOf === null is the uncut parse already done above.
+      const parsedPicksByCutoff = new Map();
+      const picksAsOf = (asOf) => {
+        if (asOf === null || asOf === undefined) return parsedPicks;
+        if (!parsedPicksByCutoff.has(asOf)) {
+          parsedPicksByCutoff.set(asOf, parseAllPicksFromSheet(responseSheet, memberData, asOf));
+        }
+        return parsedPicksByCutoff.get(asOf);
+      };
+
+      passes.forEach(pass => {
+        const passPicks = picksAsOf(pass.asOf);
+        const passGames = pass.games === null ? gamePlanGames : pass.games;
+
+        passGames.forEach(game => {
+          const teamKey = [game.awayTeam, game.homeTeam].sort().join('-');
+          const colIndex = matchupToColMap.get(teamKey);
+          if (colIndex === undefined) return;
+
+          const matchupShortName = `${game.awayTeam} @ ${game.homeTeam}`;
+          const matchupVsName = `${game.awayTeam} VS ${game.homeTeam}`;
+          // An empty startedGames set (the API failed) means nothing is started, so
+          // nothing can be voided. That is the safe direction.
+          const gameStarted = startedGames.has(matchupShortName) || startedGames.has(matchupVsName);
+
+          if (importOnlyStartedGames && !gameStarted) return; // Skip unstarted games during partial import
+
+          memberNames.forEach((memberName, rowIndex) => {
+            if (!memberName) return;
+            // NAMES_{week} and {LEAGUE}_PICKS_{week} share a start row and height by
+            // construction, but a stale or hand-edited named range must not throw here.
+            if (!picksData[rowIndex]) return;
+            const memberId = nameToMemberId.get(memberName);
+            const memberPicks = memberId ? passPicks[memberId] : null;
+
+            const { matched, pick } = pickForGame(memberPicks, game);
+            // Submitted, but never asked about this matchup. Voiding the cell would punish
+            // them for a question that was not on their form, so leave it untouched and
+            // report it instead. A member with no submission at all still gets N/A below.
+            if (memberPicks && !matched) {
+              if (!unmatchedByMatchup.has(matchupShortName)) unmatchedByMatchup.set(matchupShortName, new Set());
+              unmatchedByMatchup.get(matchupShortName).add(memberName);
+              return;
+            }
+
+            const action = latePickCellAction(picksData[rowIndex][colIndex], gameStarted, pick, pass.fill);
+            if (action === 'write') picksData[rowIndex][colIndex] = pick;
+            else if (action === 'na') picksData[rowIndex][colIndex] = 'N/A';
+          });
+        });
+      });
+
+      unmatchedByMatchup.forEach((names, matchup) => {
+        const who = [...names].map(name => `"${name}"`).join(', ');
+        Logger.log(`⚠️ Week ${week} ${matchup}: no question in the submission from ${who} matched this matchup, so those cells were left as they are rather than voided. The form was most likely regenerated after they submitted.`);
+      });
+
+      // The tiebreaker follows its own game's kickoff, not the week's, so a member
+      // submitting after that game began cannot enter the actual score. Comments are
+      // not scored and keep today's last-submission-wins behavior.
+      // The tiebreaker is one cell attached to one game, so it obeys BOTH the policy's pass
+      // structure and its own game's kickoff, whichever comes first. Under 'freeze' that
+      // distinction is the whole point: the picks lock at first kickoff, so the tiebreaker has
+      // to lock with them rather than staying open until the tiebreaker game starts. Before
+      // this, a member frozen out of changing their picks could still change their tiebreaker.
+      const tbGameKickoff = tiebreakerCutoff(config.latePolicy, gamePlan);
+      if (tiebreakers) {
+        passes.forEach(pass => {
+          const tbAsOf = tbGameKickoff === null
+            ? pass.asOf
+            : (pass.asOf === null ? tbGameKickoff : Math.min(pass.asOf, tbGameKickoff));
+          const tbPicks = picksAsOf(tbAsOf);
+          memberNames.forEach((memberName, rowIndex) => {
+            if (!memberName || !tiebreakers[rowIndex]) return;
+            const memberId = nameToMemberId.get(memberName);
+            const tb = memberId ? tbPicks[memberId] : null;
+            if (!tb || !tb.tiebreaker) return;
+            const existing = tiebreakers[rowIndex][0];
+            const isBlank = existing === '' || existing === null || existing === undefined;
+            // A blank-filling pass must not disturb what an earlier pass locked in.
+            if (pass.fill === 'blanks' && !isBlank) return;
+            tiebreakers[rowIndex][0] = tb.tiebreaker;
+          });
+        });
+      }
+
+      // Comments are not scored and belong to no game, so they keep today's
+      // last-submission-wins behavior under every policy.
       for (const memberId in parsedPicks) {
         const member = memberData.members[memberId];
         if (!member) continue;
-
-        const picks = parsedPicks[memberId];
         const rowIndex = memberNameToRowMap.get(member.name);
         if (rowIndex === undefined) continue;
-        
-        for (const question in picks.pickem) {
-          const pick = picks.pickem[question];
-
-          const game = gamePlan.games.find(g => question.includes(g.awayTeamName) && question.includes(g.homeTeamName));
-          if (game) {
-            const matchupShortName = `${game.awayTeam} @ ${game.homeTeam}`;
-            const matchupVsName = `${game.awayTeam} VS ${game.homeTeam}`;
-            
-            if (importOnlyStartedGames && !startedGames.has(matchupShortName) && !startedGames.has(matchupVsName)) {
-              continue; // Skip unstarted games during partial import
-            }
-            
-            const teamKey = [game.awayTeam, game.homeTeam].sort().join('-');
-            const colIndex = matchupToColMap.get(teamKey);
-
-            if (colIndex !== undefined) {
-              if (pick === game.awayTeam || pick === game.homeTeam) {
-                picksData[rowIndex][colIndex] = pick;
-              }
-            }
-          }
-        }
-        if (picks.tiebreaker && tiebreakers && tiebreakers[rowIndex]) tiebreakers[rowIndex][0] = picks.tiebreaker;
+        const picks = parsedPicks[memberId];
         if (picks.comments && comments && comments[rowIndex]) comments[rowIndex][0] = picks.comments;
       }
       
       // --- 4. Write Data Back to the Sheet ---
       picksRange.setValues(picksData);
-      if (!importOnlyStartedGames && config.tiebreakerInclude && tiebreakerRange) tiebreakerRange.setValues(tiebreakers);
+      // Every write above was already bounded by tiebreakerCutoff, so once the policy locks the
+      // tiebreaker its value is final and a partial import can write it safely. With no policy
+      // there is no cutoff, so the old rule stands and a partial import leaves the cell alone.
+      //
+      // Under hiding it also has to WAIT for its own game. The tiebreaker loop runs over every
+      // pass regardless of which games that pass covers, so without this the first kickoff of
+      // the week would publish everyone's tiebreaker while it was still theirs to change.
+      const tbHeld = config.hideUntilLock === true && tbGameKickoff !== null && Date.now() < tbGameKickoff;
+      if (!tbHeld && (tbGameKickoff !== null || !importOnlyStartedGames) && config.tiebreakerInclude && tiebreakerRange) tiebreakerRange.setValues(tiebreakers);
       if (!config.commentsExclude && commentRange) commentRange.setValues(comments);
 
-      Logger.log(`✅ Successfully imported Pick 'Em data into week '${week}' sheet.`);
-      ss.toast(`Imported picks for Week ${week}.`, `✅ PICKS IMPORTED`, 3);
+      if (gamePlanGames.length === 0) {
+        ss.toast(`No game plan stored for Week ${week}, so no matchup picks were imported.`, `⚠️ NOTHING IMPORTED`, 5);
+      } else {
+        Logger.log(`✅ Successfully imported Pick 'Em data into week '${week}' sheet.`);
+        ss.toast(`Imported picks for Week ${week}.`, `✅ PICKS IMPORTED`, 3);
+      }
 
     } catch (err) {
+      pickemError = err.message;
       Logger.log(`⚠️ Failed to import Pick 'Em data into week '${week}' sheet: ${err.stack}`);
       ss.toast(`Failed to import picks: ${err.message}`, `❗ PICK 'EMS FAILED`, 5);
     }
   }
 
   // --- 5. Populate Survivor & Eliminator Sheets ---
-  if (!importOnlyStartedGames) {
+  // A contest pick is one team for the WHOLE week, not a per-game choice, so it locks once, at
+  // the first kickoff. Letting it change after that would let someone move onto a team whose
+  // game had already been won. Under hideUntilLock it therefore stays off the sheet until that
+  // kickoff and is then written as of that instant, so a late import produces the same sheet an
+  // on-time one would. With the toggle off none of this applies and the old rule stands.
+  const contestLock = contestRevealCutoff(config.latePolicy, formsData[week]?.gamePlan, config.hideUntilLock);
+  const contestHeld = contestLock !== null && Date.now() < contestLock;
+  const contestPicks = contestLock === null
+    ? parsedPicks
+    : parseAllPicksFromSheet(responseSheet, memberData, contestLock);
+
+  if (contestHeld) {
+    ss.toast(`Survivor and Eliminator stay hidden until the first kickoff of Week ${week}.`, `⏳ NOT REVEALED YET`, 5);
+  } else if (contestLock !== null || !importOnlyStartedGames) {
     let survInclude = config.survivorInclude && week >= config.survivorStartWeek;
     const elimInclude = config.eliminatorInclude && week >= config.eliminatorStartWeek;
-    
-    if (survInclude) populateSurvElimSheet(ss, parsedPicks, memberData, config, formsData[week]?.gamePlan, week, 'survivor');
-    if (elimInclude) populateSurvElimSheet(ss, parsedPicks, memberData, config, formsData[week]?.gamePlan, week, 'eliminator');
-    if (survInclude || elimInclude) recordSurvElimResponses(parsedPicks, memberData, week, survInclude, elimInclude);
+
+    if (survInclude) populateSurvElimSheet(ss, contestPicks, memberData, config, formsData[week]?.gamePlan, week, 'survivor');
+    if (elimInclude) populateSurvElimSheet(ss, contestPicks, memberData, config, formsData[week]?.gamePlan, week, 'eliminator');
+    if (survInclude || elimInclude) recordSurvElimResponses(contestPicks, memberData, week, survInclude, elimInclude);
   } else {
     // Restored your original UX notification for partial imports
     const title = ((config.survivorInclude && week >= config.survivorStartWeek) && (config.eliminatorInclude && week >= config.eliminatorStartWeek)) 
@@ -6012,7 +6149,7 @@ function executePickImport(week, importOnlyStartedGames) {
   saveProperties('forms', formsData);
   SpreadsheetApp.flush();
 
-  return { success: true, message: `✅ Picks for week ${week} have been successfully imported!` };
+  return { success: true, pickemError: pickemError, message: `✅ Picks for week ${week} have been successfully imported!` };
 }
 
 /**
@@ -6218,17 +6355,635 @@ function updateOutcomeSheetVisibility(config) {
 
 
 /**
+ * A game's kickoff as epoch milliseconds.
+ *
+ * gamePlan stores `date` as an ISO-8601 STRING, not a number: analyzeScheduleData converts
+ * the schedule sheet's Date cell with value.toISOString() (picks.gs:4100-4101, where dateCol
+ * is headers.indexOf('date') at picks.gs:4087) and saveProperties JSON.stringifies it. Every
+ * consumer re-parses it, e.g. `new Date(game.date)` at picks.gs:3798.
+ *
+ * Accepts a string, a Date or a number so a hand-edited property cannot break the feature.
+ * @returns {number} epoch ms, or NaN when there is no usable kickoff.
+ */
+function kickoffMs(game) {
+  if (!game || game.date === null || game.date === undefined || game.date === '') return NaN;
+  if (game.date instanceof Date) return game.date.getTime();
+  if (typeof game.date === 'number') return isFinite(game.date) ? game.date : NaN;
+  return Date.parse(game.date);
+}
+
+/**
+ * Every distinct kickoff time in a week, ascending. Games sharing a kickoff share a lock.
+ */
+function distinctKickoffs(gamePlan) {
+  const games = (gamePlan && gamePlan.games) || [];
+  const times = new Set();
+  games.forEach(game => {
+    const kickoff = kickoffMs(game);
+    if (isFinite(kickoff)) times.add(kickoff);
+  });
+  return [...times].sort((a, b) => a - b);
+}
+
+/**
+ * The games that start at exactly this kickoff time.
+ */
+function gamesStartingAt(gamePlan, kickoff) {
+  const games = (gamePlan && gamePlan.games) || [];
+  return games.filter(game => kickoffMs(game) === kickoff);
+}
+
+/**
+ * The games whose kickoff cannot be read at all. analyzeScheduleData only converts a
+ * schedule cell with value.toISOString() when it is a real Date (picks.gs:4100-4101), so a
+ * blank or text cell leaves `date` as ''. Such a game has no kickoff to lock against, and
+ * must never be dropped: wrongly counting a late pick is recoverable, losing a pick is not.
+ */
+function gamesWithoutKickoff(gamePlan) {
+  const games = (gamePlan && gamePlan.games) || [];
+  return games.filter(game => !isFinite(kickoffMs(game)));
+}
+
+/**
+ * The games whose kickoff is still in the future. Nothing about them is locked yet.
+ */
+function gamesAfter(gamePlan, when) {
+  const games = (gamePlan && gamePlan.games) || [];
+  return games.filter(game => {
+    const kickoff = kickoffMs(game);
+    return isFinite(kickoff) && kickoff > when;
+  });
+}
+
+/**
+ * Turns a policy name into the passes the importer should run, in order.
+ * A pass is { asOf, games, fill }: parse responses with that cutoff, write those games
+ * (null means all of them), with `fill` deciding what happens to a cell that already
+ * holds something. See latePickCellAction for the three fill modes.
+ *
+ * A week with no usable kickoff times cannot express any policy, so it falls back to
+ * today's behavior rather than voiding anything.
+ *
+ * hideUntilLock (optional) keeps a game's picks off the grid until that game's own lock has
+ * passed, so that revealing and locking happen at the same moment.
+ */
+function latePolicyPasses(policy, gamePlan, now, hideUntilLock) {
+  const openPass = [{ asOf: null, games: null, fill: 'overwrite' }];
+  const resolved = resolveLatePolicy(policy);
+  const kickoffs = distinctKickoffs(gamePlan);
+  if (resolved === 'none' || kickoffs.length === 0) {
+    // 'none' is the default and would spam every import, so only a policy that was asked
+    // for and could not be applied is worth telling the operator about.
+    if (resolved !== 'none') {
+      Logger.log(`⚠️ Late policy '${resolved}' cannot be applied: no game in this week has a usable kickoff time. Importing with no cutoff instead.`);
+    }
+    return openPass;
+  }
+
+  // hideUntilLock holds a pick off the grid until its own lock has passed, so that a member
+  // cannot see a pick they might still be influenced by. It SUPPRESSES writes rather than
+  // erasing them: a value some earlier unhidden import already wrote is left where it is.
+  // To switch to an erasing variant, write those cells here with a clearing fill instead of
+  // leaving them out of the passes. One test is named for this choice and pins it.
+  const hide = hideUntilLock === true;
+
+  const firstKickoff = kickoffs[0];
+  if (resolved === 'close') {
+    // Every game locks together at the first kickoff, so before it there is nothing to reveal.
+    if (hide && now < firstKickoff) return [];
+    return [{ asOf: firstKickoff, games: null, fill: 'overwrite' }];
+  }
+  if (resolved === 'freeze') {
+    if (hide && now < firstKickoff) return [];
+    // Everyone who submitted before kickoff is written first and is then untouchable,
+    // because the second pass only fills cells that are still blank.
+    return [
+      { asOf: firstKickoff, games: null, fill: 'overwrite' },
+      { asOf: now, games: null, fill: 'blanks' },
+    ];
+  }
+  // 'game': only a kickoff that has ALREADY passed locks anything. Running an import at
+  // 11am must not freeze the 1pm games, or a member who changes their pick at 12:30 would
+  // find the 11am value stuck. Games still to come get one overwriting pass instead, so
+  // the grid previews them live and they stay changeable right up to their own kickoff.
+  //
+  // A locking pass fills with 'lock', not 'blanks', so the result does not depend on when
+  // the operator imported. Its cutoff is a kickoff, a fixed instant in the past, so the
+  // answer it computes never changes and re-asserting it is idempotent. With 'blanks' the
+  // preview value written by an earlier import would already fill the cell, the locking
+  // pass would skip it, and the as-of-kickoff answer would be lost along with any legal
+  // pre-kickoff pick change the member made after that earlier import.
+  const passes = [];
+  kickoffs.forEach(kickoff => {
+    if (kickoff <= now) {
+      passes.push({ asOf: kickoff, games: gamesStartingAt(gamePlan, kickoff), fill: 'lock' });
+    }
+  });
+  // A game whose date cannot be read has no kickoff to lock against, so it rides along with
+  // the not-yet-started games instead of falling out of every pass and never being written.
+  // When EVERY game is dateless there are no kickoffs at all and the guard above has already
+  // returned the single open pass, so this list is only ever a partial-failure repair.
+  // A dateless game rides along even under hide. It has no kickoff, so it has no lock to wait
+  // for, and leaving it out would mean its picks never reached the grid at all. Losing them
+  // silently is worse than showing a game whose stored schedule is already broken.
+  const preview = (hide ? [] : gamesAfter(gamePlan, now)).concat(gamesWithoutKickoff(gamePlan));
+  if (preview.length > 0) passes.push({ asOf: null, games: preview, fill: 'overwrite' });
+  if (passes.length > 0) return passes;
+  // Under hide, no pass means nothing has locked yet, which is exactly the intent. Falling back
+  // to the open pass here would write every pick in the week, the opposite of hiding them.
+  return hide ? [] : openPass;
+}
+
+/**
+ * Decides what to do with one member's cell for one game.
+ *
+ * The three fill modes differ only in what they do to a cell that already holds something:
+ *  'overwrite' always writes the pick, and never voids. This is today's behavior.
+ *  'blanks' writes only into an empty cell, so the first value written wins. That is what
+ *      makes a moving cutoff safe: 'freeze' re-parses up to `now`, and without this rule a
+ *      member could keep editing a pick that was supposed to be frozen at first kickoff.
+ *  'lock' always writes the pick, like 'overwrite', but also voids a started game with no
+ *      pick. It is only ever used with a cutoff that is a fixed instant in the past, so the
+ *      answer it computes never changes and re-writing it on every later import is
+ *      idempotent. 'blanks' cannot be used there: on the import after a kickoff the cell
+ *      already holds the preview value, 'blanks' would skip it, and the as-of-kickoff
+ *      answer would never land. The grid would then depend on when the operator imported.
+ *
+ * @param {*} currentValue What the sheet holds today. Anything non-empty means "filled".
+ * @param {boolean} gameStarted Live scoreboard state, not clock arithmetic.
+ * @param {string|null} pick The member's pick as of this pass's cutoff, or null.
+ * @param {string} fill 'overwrite', 'blanks' or 'lock'.
+ * @returns {string} 'skip', 'write' or 'na'
+ */
+function latePickCellAction(currentValue, gameStarted, pick, fill) {
+  const isFilled = currentValue !== '' && currentValue !== null && currentValue !== undefined;
+  if (fill === 'blanks' && isFilled) return 'skip';
+  if (pick) return 'write';
+  // Only a started game can be voided, and only in a pass that is locking an answer down.
+  // An unstarted game with no pick is simply still open, and 'overwrite' never voids at all.
+  if ((fill === 'blanks' || fill === 'lock') && gameStarted) return 'na';
+  return 'skip';
+}
+
+/**
+ * Whether a form question is about a particular matchup. Both full team names have to
+ * appear, which is how executePickImport has always lined a question up with a game.
+ */
+function questionMatchesGame(question, game) {
+  if (!game || !game.awayTeamName || !game.homeTeamName) return false;
+  const text = question === null || question === undefined ? '' : question.toString();
+  return text.includes(game.awayTeamName) && text.includes(game.homeTeamName);
+}
+
+/**
+ * One member's answer for one game, read out of their parsed submission.
+ *
+ * `matched` and `pick` are deliberately separate. A form regenerated mid-week with a game
+ * added or a matchup corrected leaves the affected respondents with no question about that
+ * game at all, and "was never asked" is not the same thing as "was asked and left it
+ * blank". Collapsing the two lets a locking pass void a member with N/A for a question they
+ * never saw, which is exactly the data loss the whole policy exists to prevent.
+ *
+ * `matched` reads the questions the form asked, not the answers it got, because the parser
+ * stores nothing at all for a blank answer. Falling back to the answered questions keeps
+ * this working on a picks cache built before `questions` existed.
+ *
+ * @param {Object|null} memberPicks One member's entry from parseAllPicksFromSheet, or null.
+ * @param {Object} game A gamePlan game, with awayTeam/homeTeam and their full team names.
+ * @returns {{matched: boolean, pick: (string|null)}} `matched` is true when the submission
+ *          was asked about this matchup. `pick` is their answer when it names one of the
+ *          two teams, and null otherwise.
+ */
+function pickForGame(memberPicks, game) {
+  const result = { matched: false, pick: null };
+  if (!memberPicks || !memberPicks.pickem || !game) return result;
+  const asked = memberPicks.questions || Object.keys(memberPicks.pickem);
+  result.matched = asked.some(question => questionMatchesGame(question, game));
+  if (!result.matched) return result;
+  for (const question in memberPicks.pickem) {
+    if (questionMatchesGame(question, game)) {
+      const answer = memberPicks.pickem[question];
+      if (answer === game.awayTeam || answer === game.homeTeam) result.pick = answer;
+      break;
+    }
+  }
+  return result;
+}
+
+/**
+ * The cutoff for the tiebreaker, which follows its own game's kickoff rather than the
+ * week's. Without this, a member submitting after the final game began could enter the
+ * actual score. Returns null when there is no policy or no usable kickoff, which means
+ * "no cutoff" and reproduces today's behavior.
+ *
+ * The tiebreaker cutoff never exceeds the policy's own week cutoff. 'close' cuts the whole
+ * week at first kickoff, so a submission whose pick'em answers were discarded on Thursday
+ * must not still land its tiebreaker on Monday night. 'freeze' and 'game' keep filling
+ * blanks past first kickoff, so there the tiebreaker legitimately follows its own game.
+ */
+function tiebreakerCutoff(policy, gamePlan) {
+  const resolved = resolveLatePolicy(policy);
+  if (resolved === 'none') return null;
+  const games = (gamePlan && gamePlan.games) || [];
+  if (games.length === 0) return null;
+  const tbIndex = games.findIndex(game => game && game.tiebreaker);
+  const game = tbIndex === -1 ? games[games.length - 1] : games[tbIndex];
+  const kickoff = kickoffMs(game);
+  if (!isFinite(kickoff)) return null;
+  if (resolved === 'close') {
+    const kickoffs = distinctKickoffs(gamePlan);
+    return kickoffs.length === 0 ? kickoff : Math.min(kickoff, kickoffs[0]);
+  }
+  return kickoff;
+}
+
+/**
+ * When a week's contest picks (Survivor, Eliminator) may be shown, or null if nothing holds
+ * them back and they can be written straight away.
+ *
+ * A contest pick names one team for the WHOLE week rather than a game, so it cannot follow the
+ * per-game schedule the pick grid uses: it locks once, at the first kickoff. Revealing it any
+ * later than that would be pointless, and revealing it earlier would let a member switch onto a
+ * team whose game had already been won.
+ */
+function contestRevealCutoff(policy, gamePlan, hideUntilLock) {
+  if (hideUntilLock !== true) return null;
+  if (resolveLatePolicy(policy) === 'none') return null;
+  const kickoffs = distinctKickoffs(gamePlan);
+  return kickoffs.length === 0 ? null : kickoffs[0];
+}
+
+
+// ============================================================================================
+// KICKOFF PICK LOCK CHAIN
+// A self-perpetuating one-time trigger that wakes shortly after each kickoff, imports that
+// week, and arms its successor. It is the other half of hideUntilLock: the policy decides what
+// the grid should show at each lock, and this is the thing that wakes at those locks. Without
+// it, picks set to stay hidden would only appear when a human happened to click Import.
+//
+// It touches no network. Wake times come from the stored game plans and what gets revealed is
+// decided by latePolicyPasses from those same kickoff times, so an ESPN outage cannot stall it
+// and cannot trick it into reporting a successful import that wrote nothing.
+// ============================================================================================
+
+const PICK_LOCK_HANDLER = 'runPickLockCheck';
+const PICK_LOCK_STATUS_KEY = 'pickLockStatus';
+
+// Late enough that a kickoff has definitely passed before the grid claims it locked, short
+// enough that nobody stares at an empty column wondering whether the pool is broken.
+const PICK_LOCK_LEAD_MS = 5 * 60 * 1000;
+
+// Nothing upcoming usually means next week's form has not been built yet, which is not a reason
+// to stand down: the chain has to still be alive when it is built.
+const PICK_LOCK_IDLE_MS = 12 * 60 * 60 * 1000;
+
+// How long to stand aside when another run holds the script lock. Short, because the run that
+// holds it is usually the outcome chain finishing, and a lock is meant to reveal at kickoff.
+const PICK_LOCK_RETRY_MS = 2 * 60 * 1000;
+
+// How late the planned check may be before the chain is presumed dead. Apps Script delays a
+// time trigger by minutes, not hours, so this is generous enough never to cry wolf.
+const PICK_LOCK_STALE_GRACE_MS = 2 * 60 * 60 * 1000;
+
+// Retry schedule after consecutive failures. A transient fault clears on the first retry; a
+// structural one (a renamed range, a deleted sheet) never does, and without this the chain would
+// fail every few minutes for the rest of the season, emailing the owner on every attempt.
+const PICK_LOCK_BACKOFF_MS = [15 * 60 * 1000, 30 * 60 * 1000, 2 * 60 * 60 * 1000, 12 * 60 * 60 * 1000];
+
+// Pure. Delay for the nth consecutive failure, capped at the last step so the chain keeps
+// retrying forever rather than standing down; a fixed problem should recover on its own.
+function pickLockBackoffMs(consecutiveFailures) {
+  const n = Math.floor(consecutiveFailures) || 1;
+  const index = Math.min(Math.max(n, 1) - 1, PICK_LOCK_BACKOFF_MS.length - 1);
+  return PICK_LOCK_BACKOFF_MS[index];
+}
+
+// Pure. The next moment any week's grid could change, as { week, at }, or null when no stored
+// kickoff is still to come. Games sharing a kickoff share a wake, so six games at 1:00 are
+// covered by one import at about 1:05. Scanning every stored week rather than tracking a
+// "current" one is what makes the rollover into a new week fall out instead of needing a rule.
+function nextPickLockCheck(formsData, nowMs) {
+  let best = null;
+  Object.keys(formsData || {}).forEach(week => {
+    const entry = formsData[week];
+    distinctKickoffs(entry && entry.gamePlan).forEach(kickoff => {
+      const at = kickoff + PICK_LOCK_LEAD_MS;
+      if (at <= nowMs) return;
+      if (best === null || at < best.at) best = { week: week, at: at };
+    });
+  });
+  return best;
+}
+
+// Pure. Every week holding a kickoff whose wake has arrived but which has not been imported
+// yet, oldest first, as [{ week, throughKickoff }].
+//
+// `revealed` maps a week to the latest kickoff already imported for it, and it is what makes
+// this correct in two directions. Without it a finished week stays "due" forever, because its
+// last kickoff is permanently in the past, so every idle wake re-imports it and overwrites any
+// correction someone typed into the grid by hand. And returning a LIST rather than a single week
+// is what lets an outage spanning a week boundary be caught up: keyed on the most recent kickoff
+// alone, the older week would simply be skipped and its locks lost for good.
+//
+// Within one week no catch-up logic is needed, because latePolicyPasses emits a locking pass for
+// every kickoff already gone by and those passes are idempotent.
+function pickLockWeeksDue(formsData, revealed, nowMs) {
+  const due = [];
+  Object.keys(formsData || {}).forEach(week => {
+    let latest = null;
+    const entry = formsData[week];
+    distinctKickoffs(entry && entry.gamePlan).forEach(kickoff => {
+      if (kickoff + PICK_LOCK_LEAD_MS > nowMs) return;
+      if (latest === null || kickoff > latest) latest = kickoff;
+    });
+    if (latest === null) return;
+    if (latest <= ((revealed && revealed[week]) || 0)) return;
+    due.push({ week: week, throughKickoff: latest });
+  });
+  return due.sort((a, b) => a.throughKickoff - b.throughKickoff);
+}
+
+// The chain exists to reveal picks at their locks, and only a locking policy has locks. Arming
+// under 'none' would just auto-publish the whole week at its first kickoff, the opposite of what
+// someone switching this on is asking for.
+function pickLockChainWanted(config) {
+  return !!(config && config.hideUntilLock === true
+    && resolveLatePolicy(config.latePolicy) !== 'none');
+}
+
+// Removes every link of the chain. There is never more than one, but a failed arm or a
+// hand-made trigger could leave strays, and two live links would double every import.
+function deletePickLockTriggers() {
+  const docProps = PropertiesService.getDocumentProperties();
+  let removed = 0;
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    if (trigger.getHandlerFunction() === PICK_LOCK_HANDLER) {
+      ScriptApp.deleteTrigger(trigger);
+      docProps.deleteProperty('triggerMeta_' + trigger.getUniqueId());
+      removed++;
+    }
+  });
+  return removed;
+}
+
+// Arms exactly one one-time trigger, mirroring setOneTimeFormLockTrigger, and records when it is
+// due so onOpen can tell whether the chain is still alive.
+function armNextPickLockCheck(date) {
+  deletePickLockTriggers();
+  const trigger = ScriptApp.newTrigger(PICK_LOCK_HANDLER).timeBased().at(date).create();
+  PropertiesService.getDocumentProperties().setProperty(
+    'triggerMeta_' + trigger.getUniqueId(),
+    JSON.stringify({ purpose: 'pickLockCheck', plannedFor: date.toISOString() }));
+  recordPickLockStatus({ nextCheck: date.toISOString() });
+  Logger.log(`⏰ Pick lock check armed for ${date.toISOString()}`);
+  return trigger.getUniqueId();
+}
+
+function readPickLockStatus() {
+  const raw = PropertiesService.getDocumentProperties().getProperty(PICK_LOCK_STATUS_KEY);
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch (err) { return {}; }
+}
+
+// A merge, so a run can record nextCheck without erasing what it reported about itself.
+function recordPickLockStatus(patch) {
+  const merged = Object.assign(readPickLockStatus(), patch || {});
+  PropertiesService.getDocumentProperties().setProperty(PICK_LOCK_STATUS_KEY, JSON.stringify(merged));
+  return merged;
+}
+
+// Trigger entry point. Deletes its own trigger, imports the week whose kickoff has just passed,
+// and ALWAYS arms the next wake before returning. Everything that can throw sits inside the try
+// so the finally still gets to re-arm; a run that dies without arming ends the chain silently.
+function runPickLockCheck(e) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30 * 1000)) {
+    // Returning bare here would END the chain. This trigger has already fired, so nothing else
+    // is going to arm a successor, and the grid would stay frozen at whatever the last run left.
+    // Stand aside for the run that holds the lock, but keep the chain alive behind it.
+    Logger.log('⭕ Pick lock check deferred: another run holds the lock.');
+    try {
+      const heldTriggerId = e && e.triggerUid;
+      if (heldTriggerId) {
+        deleteTriggerById(heldTriggerId);
+        PropertiesService.getDocumentProperties().deleteProperty('triggerMeta_' + heldTriggerId);
+      }
+      armNextPickLockCheck(new Date(Date.now() + PICK_LOCK_RETRY_MS));
+    } catch (armErr) {
+      Logger.log(`⛔ Could not re-arm after a deferred pick lock check: ${armErr.message}`);
+    }
+    return;
+  }
+
+  const docProps = PropertiesService.getDocumentProperties();
+  let nextCheck = null;
+  const summary = { lastRun: new Date().toISOString(), week: null, result: 'no-op', detail: '' };
+
+  try {
+    const triggerId = e && e.triggerUid;
+    if (triggerId) {
+      deleteTriggerById(triggerId);
+      docProps.deleteProperty('triggerMeta_' + triggerId);
+    }
+
+    if (!pickLockChainWanted(JSON.parse(docProps.getProperty('configuration') || '{}'))) {
+      summary.result = 'disabled';
+      return;
+    }
+
+    const formsData = JSON.parse(docProps.getProperty('forms') || '{}');
+    const revealed = Object.assign({}, readPickLockStatus().revealed || {});
+    const due = pickLockWeeksDue(formsData, revealed, Date.now());
+    let drained = true;
+
+    if (due.length === 0) {
+      summary.detail = 'Nothing new has locked.';
+    } else {
+      // ONE week per run. A catch-up after an outage can have several waiting, and importing
+      // them all in one go risks the six minute ceiling, which would kill the run before its
+      // finally could arm a successor. Take the oldest and come straight back for the rest.
+      const target = due[0];
+      drained = due.length === 1;
+      summary.week = target.week;
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      // The chain imports into a grid a human already built, and must never build one itself:
+      // that path runs weeklySheet, which alerts through getUi when the member list is empty.
+      if (!ss.getSheetByName(`${weeklySheetPrefix}${target.week}`)) {
+        summary.result = 'skipped';
+        summary.detail = `Week ${target.week} has no sheet yet.`;
+        Logger.log(`⏭️ Pick lock check skipped week ${target.week}: no sheet to import into.`);
+        // Marked revealed anyway. There is no grid to write, and leaving it due would make every
+        // future run retry this same week forever and never reach a later one.
+        revealed[target.week] = target.throughKickoff;
+      } else {
+        // A FULL import, never a partial one. The policy decides what is revealed, from stored
+        // kickoff times, so this needs no ESPN call and cannot be fooled by an API failure into
+        // reporting success having written nothing.
+        const outcome = executePickImport(String(target.week), false);
+        // A swallowed pick'em failure must not read as a successful reveal. Throwing here puts
+        // the chain into backoff and emails the owner, which is the whole point of the channel.
+        if (outcome && outcome.pickemError) {
+          throw new Error(`Week ${target.week} picks were not imported: ${outcome.pickemError}`);
+        }
+        summary.result = 'imported';
+        // Only after the import returns. A throw leaves the mark untouched so the next run
+        // retries this week rather than stepping silently past it.
+        revealed[target.week] = target.throughKickoff;
+      }
+      summary.revealed = revealed;
+    }
+
+    summary.consecutiveFailures = 0;
+    const next = nextPickLockCheck(formsData, Date.now());
+    if (!drained) {
+      nextCheck = new Date(Date.now() + PICK_LOCK_RETRY_MS);
+      summary.detail = `More weeks still to catch up (${due.length - 1} waiting).`;
+    } else {
+      nextCheck = next === null ? new Date(Date.now() + PICK_LOCK_IDLE_MS) : new Date(next.at);
+      if (next === null) {
+        summary.detail = summary.detail || 'No kickoff still to come; waiting for the next form.';
+      }
+    }
+  } catch (err) {
+    summary.result = 'error';
+    summary.detail = err.message;
+    summary.consecutiveFailures = (readPickLockStatus().consecutiveFailures || 0) + 1;
+    const backoff = pickLockBackoffMs(summary.consecutiveFailures);
+    Logger.log(`⛔ Pick lock check failed (${summary.consecutiveFailures} in a row, retrying in ${Math.round(backoff / 60000)}m): ${err.stack}`);
+    nextCheck = new Date(Date.now() + backoff);
+    // Rethrown on purpose: Apps Script emails the owner when a trigger fails, and that is this
+    // design's error channel. The backoff above is what stops it emailing every few minutes.
+    throw err;
+  } finally {
+    try {
+      const enabled = pickLockChainWanted(JSON.parse(docProps.getProperty('configuration') || '{}'));
+      summary.nextCheck = (nextCheck && enabled) ? nextCheck.toISOString() : null;
+      recordPickLockStatus(summary);
+      if (summary.nextCheck) armNextPickLockCheck(nextCheck);
+    } catch (armErr) {
+      // Logged, not thrown: this must not hide the original error or skip the unlock. Clear the
+      // planned time so status cannot advertise a trigger that was never armed.
+      Logger.log(`⛔ Could not record status or arm the next pick lock check: ${armErr.message}`);
+      try { recordPickLockStatus({ nextCheck: null }); } catch (ignored) {}
+    } finally {
+      lock.releaseLock();
+    }
+  }
+}
+
+// Pure. Whether the chain still looks like it is running, judged by the time it said it would
+// next wake. The trigger list is NOT the signal: a one-time trigger that has already fired can
+// linger there, so its presence would make a dead chain look healthy. A run that died before
+// arming leaves nextCheck null or long past, and that is what this catches.
+function pickLockChainLooksAlive(status, nowMs) {
+  const planned = Date.parse((status && status.nextCheck) || '');
+  return isFinite(planned) && nowMs <= planned + PICK_LOCK_STALE_GRACE_MS;
+}
+
+// Keeps the chain in step with the setting that owns it, called whenever Configuration is saved.
+// Starting it runs one check immediately: a panel action carries the clicking user's
+// authorization, and that is what lets the trigger it arms run unattended afterwards.
+function syncPickLockChain(config) {
+  if (pickLockChainWanted(config)) {
+    // Restarts a chain that is missing AND one that died without arming a successor, so that the
+    // advice warnIfPickLockStale gives, to re-save Configuration, actually does something.
+    if (pickLockChainLooksAlive(readPickLockStatus(), Date.now())) return;
+    try {
+      runPickLockCheck(null);
+    } catch (err) {
+      // runPickLockCheck rethrows so a failing TRIGGER reaches the owner by email. Saving
+      // Configuration is not that context, and its finally already armed a retry.
+      Logger.log(`⚠️ Pick lock chain started with an error: ${err.message}`);
+    }
+    return;
+  }
+  const removed = deletePickLockTriggers();
+  if (removed > 0 || readPickLockStatus().nextCheck) {
+    recordPickLockStatus({ nextCheck: null });
+    Logger.log(`🛑 Pick lock chain stopped (${removed} trigger(s) removed).`);
+  }
+}
+
+// Called whenever a game plan is stored. The armed wake was computed from the weeks that existed
+// when it was armed, so a week built afterwards is invisible to it. For an idle chain that means
+// up to twelve hours, which is long enough to play a whole Thursday night game with every pick
+// still hidden. Only ever pulls the wake EARLIER; a later one would delay locks already booked.
+function refreshPickLockSchedule() {
+  try {
+    const docProps = PropertiesService.getDocumentProperties();
+    if (!pickLockChainWanted(JSON.parse(docProps.getProperty('configuration') || '{}'))) return;
+    const next = nextPickLockCheck(JSON.parse(docProps.getProperty('forms') || '{}'), Date.now());
+    if (next === null) return;
+    const planned = Date.parse(readPickLockStatus().nextCheck || '');
+    if (isFinite(planned) && planned <= next.at) return;
+    armNextPickLockCheck(new Date(next.at));
+    Logger.log(`⏰ Pick lock wake pulled forward to ${new Date(next.at).toISOString()} for week ${next.week}.`);
+  } catch (err) {
+    Logger.log(`⚠️ Could not refresh the pick lock schedule: ${err.message}`);
+  }
+}
+
+// Cheap enough for onOpen: one property read, and a trigger scan only when the chain claims to
+// be running. Worth the check because a dead pick chain is otherwise invisible: an empty pick
+// column looks exactly like nobody having submitted yet, so nothing looks wrong until someone
+// complains their pick vanished.
+function warnIfPickLockStale(docProps) {
+  try {
+    if (!pickLockChainWanted(JSON.parse(docProps.getProperty('configuration') || '{}'))) return;
+    if (pickLockChainLooksAlive(readPickLockStatus(), Date.now())) return;
+    SpreadsheetApp.getActiveSpreadsheet().toast(
+      'Picks are set to stay hidden until kickoff, but nothing is scheduled to reveal them. Re-save Configuration to restart it.',
+      '⚠️ PICK REVEAL STOPPED', 10);
+  } catch (err) {
+    Logger.log(`⚠️ Could not check the pick lock chain: ${err.message}`);
+  }
+}
+
+/**
+ * The four late-submission policies. Order is the order shown in the Configuration panel.
+ */
+const LATE_POLICIES = ['none', 'close', 'freeze', 'game'];
+
+/**
+ * Locates the form's submission-time column. Google writes a "Timestamp" header for a
+ * spreadsheet-destination form, but the fallback covers a renamed header.
+ * @returns {number} Column index, or -1 when no usable timestamp column exists.
+ */
+function findTimestampColumn(headers, sampleRow) {
+  const timestampRegex = /^timestamp$/i;
+  const headerRow = headers || [];
+  for (let i = 0; i < headerRow.length; i++) {
+    const header = headerRow[i];
+    if (header === null || header === undefined) continue;
+    if (timestampRegex.test(header.toString().trim())) return i;
+  }
+  if (sampleRow && sampleRow[0] instanceof Date) return 0;
+  return -1;
+}
+
+/**
+ * An unrecognized or absent value means "no policy", which is today's behavior.
+ */
+function resolveLatePolicy(value) {
+  return LATE_POLICIES.indexOf(value) === -1 ? 'none' : value;
+}
+
+/**
  * Reads a raw form response sheet, de-duplicates to "last
  * submission wins", and parses all pick types into a clean, structured object.
  * This is a read-only operation and does not modify any properties.
  *
  * @param {Sheet} sheet The Google Sheet object for a specific week's responses (e.g., 'WK1').
  * @param {Object} memberData The complete, current 'members' object.
+ * @param {number} [asOf] Optional submission-time cutoff, as epoch milliseconds. When
+ *                        given, only rows submitted at or before this instant are
+ *                        considered for "last submission wins". Omit (or pass null/undefined)
+ *                        for today's no-cutoff behavior.
  * @returns {Object} A "picks cache" object, where keys are member IDs and values
  *                   are objects containing all of that member's final picks.
  *                   e.g., { "id_123": { pickem: {...}, survivor: "BAL", ... } }
  */
-function parseAllPicksFromSheet(sheet, memberData) {
+function parseAllPicksFromSheet(sheet, memberData, asOf) {
   if (!sheet) {
     Logger.log(`⭕ "parseAllPicksFromSheet" was called with a null sheet. Returning empty object.`);
     return {};
@@ -6241,7 +6996,8 @@ function parseAllPicksFromSheet(sheet, memberData) {
   }
 
   const headers = data.shift();
-  
+  const tsCol = findTimestampColumn(headers, data[0]);
+
   // --- Find critical column indexes using helper ---
   const { nameCol, newNameCol } = findNameColumns(headers);
   if (nameCol === -1 && newNameCol === -1) {
@@ -6256,9 +7012,15 @@ function parseAllPicksFromSheet(sheet, memberData) {
   const newUserAnswerRegex = /new user/i;
   data.forEach(row => {
     const name = (nameCol === -1 || newUserAnswerRegex.test(row[nameCol]))
-      ? row[newNameCol] 
+      ? row[newNameCol]
       : row[nameCol];
     if (name && name.trim() !== '') {
+      // A cutoff makes this "last submission before asOf wins". A row whose timestamp
+      // cannot be read is kept: dropping it would blank a pick over a data problem.
+      if (asOf != null && tsCol !== -1) {
+        const ts = row[tsCol] instanceof Date ? row[tsCol].getTime() : null;
+        if (ts !== null && ts > asOf) return;
+      }
       latestSubmissions[name.trim().toLowerCase()] = row;
     }
   });
@@ -6282,6 +7044,18 @@ function parseAllPicksFromSheet(sheet, memberData) {
   const commentsRegex = /comments/i;
   const pickemRegex = / at /i;
 
+  // Every matchup question this form ASKED, answered or not. A blank answer is never stored
+  // below, so without this list "left the question blank" and "was never asked the question
+  // at all" look identical downstream, and a locking pass would void both with N/A. Only
+  // the first is a real non-pick; the second means the form and the game plan disagree.
+  const askedQuestions = headers.filter(header => {
+    const question = header === null || header === undefined ? '' : header.toString();
+    if (commentsRegex.test(question)) return false;
+    if (survivorRegex.test(question) || eliminatorRegex.test(question)) return false;
+    if (tiebreakerRegex.test(question)) return false;
+    return pickemRegex.test(question);
+  });
+
   finalResponseRows.forEach(row => {
     const name = (nameCol === -1 || newUserAnswerRegex.test(row[nameCol])) ? row[newNameCol] : row[nameCol];
     const memberId = nameToIdMap[name.trim().toLowerCase()];
@@ -6295,6 +7069,7 @@ function parseAllPicksFromSheet(sheet, memberData) {
 
     const userPicks = {
       pickem: {},
+      questions: askedQuestions,
       survivor: null,
       eliminator: null,
       tiebreaker: null,
@@ -12649,6 +13424,21 @@ function fetchSpreadsheet(ss) {
 }
 
 // FETCH UI - Checks that the 'ui' variable passed into a script is not null, undefined, or a non-UI
+/**
+ * The UI, or null when there is nobody to show it to.
+ *
+ * SpreadsheetApp.getUi() THROWS from a time-based trigger rather than returning null, so any
+ * prompt on a code path a trigger can reach has to ask first. Callers that only wanted to tell
+ * the operator something should carry on quietly when this returns null.
+ */
+function tryFetchUi() {
+  try {
+    return SpreadsheetApp.getUi();
+  } catch (err) {
+    return null;
+  }
+}
+
 function fetchUi(ui) {
   try{
     if (typeof ui.showModalDialog !== 'function') {
@@ -13191,5 +13981,29 @@ function saveManualMemberData(payload) {
     return "✅ Master JSON data saved successfully!";
   } catch (err) {
     throw new Error(err.message);
+  }
+}
+
+/**
+ * Diagnostic. Reports what column A of a week's response sheet actually contains,
+ * because a Date and a text string are indistinguishable when you look at the cell.
+ * Run once from the Apps Script editor; not wired to any menu.
+ */
+function inspectResponseTimestamps(week) {
+  const sheet = getDatabaseSheet().getSheetByName(`WK${week}`);
+  if (!sheet) {
+    Logger.log(`⭕ No response sheet WK${week}.`);
+    return;
+  }
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) {
+    Logger.log(`⭕ WK${week} has headers but no responses.`);
+    return;
+  }
+  Logger.log(`Header row: ${JSON.stringify(data[0].slice(0, 4))}`);
+  for (let i = 1; i < Math.min(data.length, 4); i++) {
+    const cell = data[i][0];
+    const kind = cell instanceof Date ? 'Date' : typeof cell;
+    Logger.log(`Row ${i}: column A is a ${kind}, value ${cell}`);
   }
 }

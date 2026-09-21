@@ -1,9 +1,6 @@
-# local working files
-docs/audit/
-docs/AUDIT-NOTES.md
-
-# agent workflow scaffolding - local only, never upstream
-docs/superpowers/
+# local working files and agent workflow scaffolding - never upstream
+# docs/ is scratch in this repo: no branch has ever tracked a file under it.
+docs/
 .superpowers/
 
 # clasp deployment config - both are per-spreadsheet and never upstream.
@@ -12,3 +9,6 @@ docs/superpowers/
 .clasp.json
 .clasp.json.*
 appsscript.json
+
+# node
+node_modules/

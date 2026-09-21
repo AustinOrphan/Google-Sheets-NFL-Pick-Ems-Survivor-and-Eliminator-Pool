@@ -127,6 +127,21 @@
       <div class="space"></div>
       <div class="switch-row"><div class="tooltip switch-label">Import Participants Only<span class="tooltiptext">For pools where weekly involvement changes. Select this option if you only want to show entrants who have submitted picks for a given week.</span></div><label class="switch"><input type="checkbox" id="hideNonParticipants" name="hideNonParticipants"><span class="slider"></span></label></div>
       <div class="space"></div>
+      <div class="dropdown-row">
+        <div class="tooltip dropdown-label">
+          Late Submissions
+          <span class="tooltiptext">What happens to picks submitted after games have started. Freeze week and Per game write N/A for a member who had not picked a game before it kicked off. Those cells are rewritten on every import, so a pick you type in by hand for someone who never submitted will not survive the next one.</span>
+        </div>
+        <select class="dropdown-select" id="latePolicy" name="latePolicy">
+          <option value="none">Open — all picks import whenever they arrive</option>
+          <option value="close">Close form — the form shuts when the first game starts</option>
+          <option value="freeze">Freeze week — picks lock at first kickoff; one late entry allowed, N/A for started games</option>
+          <option value="game">Per game — each pick locks when its own game starts; unpicked games get N/A</option>
+        </select>
+      </div>
+      <div class="space"></div>
+      <div class="switch-row"><div class="tooltip switch-label">Hide Picks Until Kickoff<span class="tooltiptext">Keep each pick off the weekly sheet until it locks, so that revealing and locking happen at the same moment and members can still change their picks beforehand without anyone seeing them. This follows the Late Submissions setting above: Per game reveals each game at its own kickoff, Freeze week and Close form reveal the whole week at the first kickoff. It has no effect while Late Submissions is set to Open. Survivor and Eliminator always reveal at the first kickoff, because a contest pick covers the whole week.</span></div><label class="switch"><input type="checkbox" id="hideUntilLock" name="hideUntilLock"><span class="slider"></span></label></div>
+      <div class="space"></div>
     </div>
     <!-- SURVIVOR SECTION -->
     <div class="card-header" id="survivorHeader">
@@ -320,6 +335,9 @@
           }
           if (savedProps.hasOwnProperty('survivorStartWeek')) {
             const radio = document.querySelector(`select[name="survivorStartWeek"]`).value = savedProps.survivorStartWeek || savedProps.week;
+          }
+          if (savedProps.hasOwnProperty('latePolicy')) {
+            document.querySelector(`select[name="latePolicy"]`).value = savedProps.latePolicy || 'none';
           }
           if (savedProps.hasOwnProperty('survivorLives')) {
             const radio = document.querySelector(`input[name="survivorLives"][value="${savedProps.survivorLives}"]`);
